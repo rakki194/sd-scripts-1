@@ -3530,6 +3530,13 @@ def add_optimizer_arguments(parser: argparse.ArgumentParser):
             raise argparse.ArgumentTypeError(f"'{value}' is not an int or float")
 
     parser.add_argument(
+        "--scale_mse_loss",
+        type=float,
+        default=None,
+        help="If set, scale the MSE (l2) loss by this factor (e.g., 1/9 for SDXL, or 0.111...) / MSE損失をこの値でスケーリングします",
+    )
+
+    parser.add_argument(
         "--optimizer_type",
         type=str,
         default="",

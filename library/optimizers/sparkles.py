@@ -184,11 +184,23 @@ class SPARKLES(Optimizer):
         alpha: float = 1.0,
         epsilon: float = 1e-8,
     ) -> None:
-        r"""Normalize gradient with standard deviation.
-        :param x: torch.Tensor. Gradient.
-        :param use_channels: bool. Channel-wise normalization.
-        :param alpha: float. Interpolation weight between original and normalized gradient.
-        :param epsilon: float. Small value to prevent division by zero.
+        """
+        Normalizes the input gradient tensor using its standard deviation, optionally channel-wise.
+
+        This function interpolates between the original gradient and its normalized version (divided by its 
+        standard deviation), controlled by the parameter `alpha`. If `use_channels` is True and the tensor has
+        more than one dimension, normalization is performed across all dimensions except the first (typically
+        the batch dimension), provided all reduction dimensions have more than one element.
+        Otherwise, normalization is performed globally if the tensor has more than two elements.
+
+        Args:
+            x (torch.Tensor): The gradient tensor to normalize (in-place).
+            use_channels (bool, optional): If True, normalize per-channel (across all but the first dimension). 
+            Default: False.
+            alpha (float, optional): Interpolation weight between the original and normalized gradient.
+            Default: 1.0.
+            epsilon (float, optional): Small value added to the standard deviation for numerical stability.
+            Default: 1e-8.
         """
         size: int = x.dim()
         if size > 1 and use_channels:
@@ -196,7 +208,7 @@ class SPARKLES(Optimizer):
             # Only normalize if all reduction dims have more than 1 element
             if all(x.size(d) > 1 for d in reduce_dims):
                 s = x.std(dim=reduce_dims, keepdim=True).add_(epsilon)
-            x.lerp_(x.div_(s), weight=alpha)
+                x.lerp_(x.div_(s), weight=alpha)
         elif torch.numel(x) > 2:
             s = x.std().add_(epsilon)
             x.lerp_(x.div_(s), weight=alpha)

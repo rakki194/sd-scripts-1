@@ -1009,7 +1009,9 @@ class NetworkTrainer:
                         loss = apply_debiased_estimation(loss, timesteps, noise_scheduler, args.v_parameterization)
 
                     loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
-
+                    # Apply scaled MSE loss if enabled
+                    if getattr(args, "scale_mse_loss", None) is not None and args.loss_type == "l2":
+                        loss = loss * args.scale_mse_loss
                     accelerator.backward(loss)
                     if accelerator.sync_gradients:
                         self.all_reduce_network(accelerator, network)  # sync DDP grad manually

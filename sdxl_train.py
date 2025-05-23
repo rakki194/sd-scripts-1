@@ -737,6 +737,9 @@ def train(args):
                     loss = train_util.conditional_loss(
                         noise_pred.float(), target.float(), reduction="mean", loss_type=args.loss_type, huber_c=huber_c
                     )
+                # Apply scaled MSE loss if enabled
+                if getattr(args, "scale_mse_loss", None) is not None and args.loss_type == "l2":
+                    loss = loss * args.scale_mse_loss
 
                 accelerator.backward(loss)
 

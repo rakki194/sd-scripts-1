@@ -376,14 +376,10 @@ def train(args):
                     loss = apply_debiased_estimation(loss, timesteps, noise_scheduler, args.v_parameterization)
 
                 loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
-
+                # Apply scaled MSE loss if enabled
+                if getattr(args, "scale_mse_loss", None) is not None and args.loss_type == "l2":
+                    loss = loss * args.scale_mse_loss
                 accelerator.backward(loss)
-                if accelerator.sync_gradients and args.max_grad_norm != 0.0:
-                    if train_text_encoder:
-                        params_to_clip = itertools.chain(unet.parameters(), text_encoder.parameters())
-                    else:
-                        params_to_clip = unet.parameters()
-                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
                 optimizer.step()
                 lr_scheduler.step()
