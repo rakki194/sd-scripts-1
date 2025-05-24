@@ -171,6 +171,11 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
 def setup_parser() -> argparse.ArgumentParser:
     parser = train_network.setup_parser()
     sdxl_train_util.add_sdxl_training_arguments(parser)
+    parser.add_argument(
+        "--determinism",
+        action="store_true",
+        help="Enable strict determinism: sets all seeds, torch.use_deterministic_algorithms(True, warn_only=False), and cudnn deterministic flags. / 完全な決定論的動作を有効にします。全てのシードを設定し、torch.use_deterministic_algorithms(True, warn_only=False) および cudnn の決定論的フラグを有効にします。"
+    )
     return parser
 
 
@@ -181,12 +186,18 @@ if __name__ == "__main__":
     train_util.verify_command_line_training_args(args)
     args = train_util.read_config_from_file(args, parser)
 
+    if getattr(args, 'determinism', False):
+        print("[INFO] Strict determinism is ENABLED.")
+    else:
+        print("[INFO] Strict determinism is DISABLED.")
+
     # --- DETERMINISM PATCH START ---
-    if hasattr(args, 'seed') and args.seed is not None:
+    if getattr(args, 'determinism', False) and hasattr(args, 'seed') and args.seed is not None:
+        print("[Determinism] Enabling strict deterministic training mode.")
         np.random.seed(args.seed)
         try:
             import torch
-            torch.use_deterministic_algorithms(True, warn_only=True)
+            torch.use_deterministic_algorithms(True, warn_only=False)
             if hasattr(torch.backends, 'cudnn'):
                 torch.backends.cudnn.deterministic = True
                 torch.backends.cudnn.benchmark = False

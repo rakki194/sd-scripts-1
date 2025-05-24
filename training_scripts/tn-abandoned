@@ -1,9 +1,12 @@
 #!/usr/bin/env zsh
 set -e -o pipefail
 
-NAME=noob-sparkles-abandoned-v1s3000                    # Name of the model to be trained (continued version)
+# Ensure deterministic CuBLAS for PyTorch
+export CUBLAS_WORKSPACE_CONFIG=:4096:8
+
+NAME=noob-sparkles-abandoned_subset-v1s1500                    # Name of the model to be trained (continued version)
 # Optional variables
-TRAINING_DIR="/home/kade/datasets/abandoned"                     # Directory containing dataset
+TRAINING_DIR="/home/kade/datasets/abandoned_subset"                     # Directory containing dataset
 # STEPS=                                                  # Total training steps
 # OUTPUT_DIR=                                             # Directory for saving outputs
 
@@ -13,6 +16,8 @@ SD_REPO="${SD_REPO:-$HOME/sd-scripts}"  # Repository containing training scripts
 # alpha=1 @ dim=16 is the same lr than alpha=4 @ dim=256
 # --min_snr_gamma=1
 args=(
+    --determinism                             # Enable deterministic training for reproducibility
+    --scale_mse_loss=0.111111                 # Scale MSE loss to balance with other losses
     --debiased_estimation_loss                # Use debiased estimation in the loss calculation, reduces training time and improves quality
     --max_token_length=225                    # Maximum token length for text encoders
     # Keep Tokens

@@ -1,7 +1,10 @@
 #!/usr/bin/env zsh
 set -e -o pipefail
 
-NAME=noob-adamw-miniblaidd-v2s100                    # Name of the model to be trained (continued version)
+# Ensure deterministic CuBLAS for PyTorch
+export CUBLAS_WORKSPACE_CONFIG=:4096:8
+
+NAME=noob-sparkles-miniblaidd3-v5s30                    # Name of the model to be trained (continued version)
 # Optional variables
 TRAINING_DIR="/home/kade/datasets/miniblaidd"                     # Directory containing dataset
 # STEPS=                                                  # Total training steps
@@ -13,6 +16,8 @@ SD_REPO="${SD_REPO:-$HOME/sd-scripts}"  # Repository containing training scripts
 # alpha=1 @ dim=16 is the same lr than alpha=4 @ dim=256
 # --min_snr_gamma=1
 args=(
+    --determinism                            # Enable strict determinism
+    #--scale_mse_loss 0.111111                 # Scale MSE loss by 0.111111
     --debiased_estimation_loss                # Use debiased estimation in the loss calculation, reduces training time and improves quality
     --max_token_length=225                    # Maximum token length for text encoders
     # Keep Tokens
@@ -62,7 +67,7 @@ args=(
                "train_norm=False"             # Don't train norm layers
     --network_dropout=0                       # Dropout for the network (0 = no dropout)
     # Optimizer config
-    --optimizer_type="AdamW"                 # Use SPARKLES optimizer
+    --optimizer_type="SPARKLES"                 # Use SPARKLES optimizer
     --train_batch_size=14                     # Batch size for training
     --max_grad_norm=1                         # Maximum gradient norm for gradient clipping
     --gradient_checkpointing                  # Use gradient checkpointing to save memory
@@ -82,8 +87,8 @@ args=(
     # Optimization, details
     --full_bf16                               # Use bfloat16 precision for the entire model
     --xformers
-    #--torch_compile                           # Use PyTorch 2.0+ compilation for speed
-    #--dynamo_backend="inductor"               # Use inductor backend for torch.compile
+    --torch_compile                           # Use PyTorch 2.0+ compilation for speed
+    --dynamo_backend="inductor"               # Use inductor backend for torch.compile
     --no_half_vae                             # Don't use half precision for VAE, improves stability
     --sdpa                                    # Use Scaled Dot Product Attention for better memory usage
     --mixed_precision="bf16"                  # Use mixed precision training with bfloat16

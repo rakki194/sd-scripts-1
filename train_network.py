@@ -370,6 +370,12 @@ class NetworkTrainer:
         # DataLoaderのプロセス数：0 は persistent_workers が使えないので注意
         n_workers = min(args.max_data_loader_n_workers, os.cpu_count())  # cpu_count or max_data_loader_n_workers
 
+        def worker_init_fn(worker_id):
+            seed = torch.initial_seed() % 2**32
+            import random, numpy as np
+            random.seed(seed)
+            np.random.seed(seed)
+
         train_dataloader = torch.utils.data.DataLoader(
             train_dataset_group,
             batch_size=1,
@@ -377,6 +383,7 @@ class NetworkTrainer:
             collate_fn=collator,
             num_workers=n_workers,
             persistent_workers=args.persistent_data_loader_workers,
+            worker_init_fn=worker_init_fn,
         )
 
         # 学習ステップ数を計算する
