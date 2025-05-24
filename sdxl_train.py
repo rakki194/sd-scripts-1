@@ -44,6 +44,7 @@ from library.custom_train_functions import (
     apply_masked_loss,
 )
 from library.sdxl_original_unet import SdxlUNet2DConditionModel
+from torch.utils.tensorboard import SummaryWriter
 
 
 UNET_NUM_BLOCKS_FOR_BLOCK_LR = 23
@@ -356,6 +357,9 @@ def train(args):
     # 学習に必要なクラスを準備する
     accelerator.print("prepare optimizer, data loader etc.")
 
+    writer = SummaryWriter(log_dir=args.logging_dir or "runs/quantization_metrics")
+    print(f"Using TensorBoard SummaryWriter at: {args.logging_dir or 'runs/quantization_metrics'}")
+
     if args.fused_optimizer_groups:
         # fused backward pass: https://pytorch.org/tutorials/intermediate/optimizer_step_in_backward_tutorial.html
         # Instead of creating an optimizer for all parameters as in the tutorial, we create an optimizer for each group of parameters.
@@ -394,14 +398,14 @@ def train(args):
         # prepare optimizers for each group
         optimizers = []
         for group in grouped_params:
-            _, _, optimizer = train_util.get_optimizer(args, trainable_params=[group])
+            _, _, optimizer = train_util.get_optimizer(args, trainable_params=[group], writer=writer)
             optimizers.append(optimizer)
         optimizer = optimizers[0]  # avoid error in the following code
 
         logger.info(f"using {len(optimizers)} optimizers for fused optimizer groups")
 
     else:
-        _, _, optimizer = train_util.get_optimizer(args, trainable_params=params_to_optimize)
+        _, _, optimizer = train_util.get_optimizer(args, trainable_params=params_to_optimize, writer=writer)
 
     # dataloaderを準備する
     # DataLoaderのプロセス数：0 は persistent_workers が使えないので注意
@@ -750,7 +754,7 @@ def train(args):
                             params_to_clip.extend(m.parameters())
                         accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
-                    optimizer.step()
+                    optimizer.step(global_step=global_step)
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
                 else:
