@@ -43,8 +43,6 @@ from library.utils import setup_logging, add_logging_arguments
 setup_logging()
 import logging
 
-from torch.utils.tensorboard import SummaryWriter
-
 logger = logging.getLogger(__name__)
 
 
@@ -341,8 +339,7 @@ class NetworkTrainer:
 
         # 後方互換性を確保するよ
         try:
-            writer = SummaryWriter(log_dir=args.logging_dir or "runs/quantization_metrics")
-            results = network.prepare_optimizer_params(args.text_encoder_lr, args.unet_lr, args.learning_rate, writer=writer)
+            results = network.prepare_optimizer_params(args.text_encoder_lr, args.unet_lr, args.learning_rate)
             if type(results) is tuple:
                 trainable_params = results[0]
                 lr_descriptions = results[1]
@@ -367,7 +364,7 @@ class NetworkTrainer:
         #             v = len(v)
         #         accelerator.print(f"trainable_params: {k} = {v}")
 
-        optimizer_name, optimizer_args, optimizer = train_util.get_optimizer(args, trainable_params, writer=writer)
+        optimizer_name, optimizer_args, optimizer = train_util.get_optimizer(args, trainable_params)
 
         # dataloaderを準備する
         # DataLoaderのプロセス数：0 は persistent_workers が使えないので注意
@@ -1029,7 +1026,7 @@ class NetworkTrainer:
                             params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
                             accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
-                    optimizer.step(global_step=global_step)
+                    optimizer.step()
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
 

@@ -2,7 +2,6 @@ import torch
 from torch.optim import Optimizer
 from typing import Callable, Optional, Tuple
 import random
-from torch.utils.tensorboard import SummaryWriter
 
 
 # @torch.compile
@@ -128,8 +127,6 @@ class SPARKLES(Optimizer):
             Size of local neighborhood as fraction of tensor size (default: 0.1).
         adaptive_scale_factor (float, optional):
             Scaling factor for adaptive permutation based on gradient variance (default: 1.0).
-        writer (Optional[SummaryWriter], optional):
-            TensorBoard SummaryWriter for logging quantization/underflow metrics (default: None).
     """
 
     def __init__(
@@ -155,7 +152,6 @@ class SPARKLES(Optimizer):
         magnitude_bands: int = 5,
         local_neighborhood_size: float = 0.1,
         adaptive_scale_factor: float = 1.0,
-        writer: Optional[SummaryWriter] = None,
     ):
         defaults = dict(
             lr=lr,
@@ -180,8 +176,6 @@ class SPARKLES(Optimizer):
             adaptive_scale_factor=adaptive_scale_factor,
         )
         super(SPARKLES, self).__init__(params, defaults)
-        self.writer = writer
-        self._last_logged_step = -1
 
     def normalize_gradient(
         self,
@@ -463,36 +457,16 @@ class SPARKLES(Optimizer):
             # Add noise to BF16 tensor
             return x_bf16 + noise.to(torch.bfloat16)
 
-    def _log_below_threshold_stats(self, tensor, threshold, name, global_step):
-        if self.writer is None:
-            return
-        abs_tensor = tensor.abs()
-        below = (abs_tensor < threshold).sum().item()
-        total = abs_tensor.numel()
-        percent = 100.0 * below / total if total > 0 else 0.0
-        min_val = abs_tensor.min().item() if total > 0 else 0.0
-        max_val = abs_tensor.max().item() if total > 0 else 0.0
-        self.writer.add_scalar(f"quantization/{name}_below_threshold_count", below, global_step)
-        self.writer.add_scalar(f"quantization/{name}_below_threshold_percent", percent, global_step)
-        self.writer.add_scalar(f"quantization/{name}_min", min_val, global_step)
-        self.writer.add_scalar(f"quantization/{name}_max", max_val, global_step)
-
-    def step(self, closure: Optional[Callable] = None, global_step: Optional[int] = None):
+    def step(self, closure: Optional[Callable] = None):
         """Perform a single optimization step.
 
         Args:
             closure (Callable, optional):
                 A closure that reevaluates the model and returns the loss.
-            global_step (Optional[int], optional):
-                Global step for logging quantization/underflow stats (default: None).
         """
         loss = None
         if closure is not None:
             loss = closure()
-
-        BF16_MIN = 1.1754943508222875e-38
-        GRAD_THRESHOLD = 9 * BF16_MIN
-        EMA2_THRESHOLD = 81 * BF16_MIN
 
         for group in self.param_groups:
             lr = group["lr"]
@@ -706,14 +680,5 @@ class SPARKLES(Optimizer):
                         ema_squared.copy_(ema_squared_fp32.to(torch.bfloat16))
                 else:
                     ema_squared.copy_(ema_squared_fp32)
-
-                # Log quantization/underflow stats to TensorBoard if writer and global_step are provided
-                if self.writer is not None and global_step is not None:
-                    # Only log once per step (not per parameter)
-                    if self._last_logged_step != global_step:
-                        self._log_below_threshold_stats(grad_fp32, GRAD_THRESHOLD, "grad_fp32", global_step)
-                        self._log_below_threshold_stats(ema_fp32, GRAD_THRESHOLD, "ema_fp32", global_step)
-                        self._log_below_threshold_stats(ema_squared_fp32, EMA2_THRESHOLD, "ema_squared_fp32", global_step)
-                        self._last_logged_step = global_step
 
         return loss
