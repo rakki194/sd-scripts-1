@@ -4730,7 +4730,7 @@ def resume_from_local_or_hf_if_specified(accelerator, args):
     accelerator.load_state(dirname)
 
 
-def get_optimizer(args, trainable_params):
+def get_optimizer(args, trainable_params, writer=None):
     # "Optimizer to use: AdamW, AdamW8bit, Lion, SGDNesterov, SGDNesterov8bit, PagedAdamW, PagedAdamW8bit, PagedAdamW32bit, Lion8bit, PagedLion8bit, AdEMAMix8bit, PagedAdEMAMix8bit, DAdaptation(DAdaptAdamPreprint), DAdaptAdaGrad, DAdaptAdam, DAdaptAdan, DAdaptAdanIP, DAdaptLion, DAdaptSGD, Adafactor"
 
     optimizer_type = args.optimizer_type
@@ -5083,7 +5083,7 @@ def get_optimizer(args, trainable_params):
             optimizer_class = SPARKLES
         except ImportError:
             raise ImportError("Importing SPARKLES failed")
-        optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
+        optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs, writer=writer)
 
     elif optimizer_type == "SPARKFREE".lower():
         logger.info(f"use SPARKFREE optimizer | {optimizer_kwargs}")

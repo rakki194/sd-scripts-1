@@ -350,22 +350,23 @@ class NetworkTrainer:
                 trainable_params = results
                 lr_descriptions = None
         except TypeError as e:
-            # logger.warning(f"{e}")
-            # accelerator.print(
-            #     "Deprecated: use prepare_optimizer_params(text_encoder_lr, unet_lr, learning_rate) instead of prepare_optimizer_params(text_encoder_lr, unet_lr)"
-            # )
             trainable_params = network.prepare_optimizer_params(args.text_encoder_lr, args.unet_lr)
             lr_descriptions = None
 
-        # if len(trainable_params) == 0:
-        #     accelerator.print("no trainable parameters found / 学習可能なパラメータが見つかりませんでした")
-        # for params in trainable_params:
-        #     for k, v in params.items():
-        #         if type(v) == float:
-        #             pass
-        #         else:
-        #             v = len(v)
-        #         accelerator.print(f"trainable_params: {k} = {v}")
+        # Recursively flatten any nested lists/tuples in each 'params' value
+        def flatten_params(params):
+            flat = []
+            for p in params:
+                if isinstance(p, (list, tuple)):
+                    flat.extend(flatten_params(p))
+                else:
+                    flat.append(p)
+            return flat
+
+        if isinstance(trainable_params, list) and len(trainable_params) > 0:
+            for group in trainable_params:
+                if isinstance(group, dict) and isinstance(group['params'], (list, tuple)):
+                    group['params'] = flatten_params(group['params'])
 
         optimizer_name, optimizer_args, optimizer = train_util.get_optimizer(args, trainable_params, writer=writer)
 
