@@ -4,7 +4,7 @@ set -e -o pipefail
 # Ensure deterministic CuBLAS for PyTorch
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 
-NAME=noob-sparkles-miniblaidd-v6s30                    # Name of the model to be trained (continued version)
+NAME=noob-sparkles-miniblaidd3-v5s30                    # Name of the model to be trained (continued version)
 # Optional variables
 TRAINING_DIR="/home/kade/datasets/miniblaidd"                     # Directory containing dataset
 # STEPS=                                                  # Total training steps
@@ -97,9 +97,9 @@ args=(
     --save_precision="fp16"                   # Save model in fp16 precision
     --save_every_n_steps=100                  # Save a checkpoint every 100 steps
     # Sampling
-    #--sample_every_n_steps=1                # Generate sample images every 100 steps
-    #--sample_sampler="euler"                  # Use Euler sampler for image generation
-    #--sample_at_first                         # Generate sample images at the start of training
+    --sample_every_n_steps=1                # Generate sample images every 100 steps
+    --sample_sampler="euler"                  # Use Euler sampler for image generation
+    --sample_at_first                         # Generate sample images at the start of training
     --caption_extension=".txt"                # Extension for caption files
 )
 
