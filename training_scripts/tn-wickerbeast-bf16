@@ -1,0 +1,184 @@
+#!/usr/bin/env zsh
+set -e -o pipefail
+
+NAME=wickerbeast-v2s1600
+# Optional variables
+TRAINING_DIR="/home/kade/toolkit/diffusion/datasets/wickerbeast"
+# OUTPUT_DIR=
+
+SD_SCRIPT="${SD_SCRIPT:-sdxl_train_network.py}"
+SD_REPO="${SD_REPO:-$HOME/source/repos/sd-scripts}"
+
+# alpha=1 @ dim=16 is the same lr than alpha=4 @ dim=256
+# --min_snr_gamma=1
+args=(
+    # ⚠️  TODO: Benchmark...
+    --debiased_estimation_loss
+    # ⚠️  TODO: What does this do? Does it even work?
+    --max_token_length=225
+    # Keep Tokens
+    --keep_tokens=1
+    --keep_tokens_separator="|||"
+    # Model
+    --pretrained_model_name_or_path=/home/kade/toolkit/diffusion/comfy/models/checkpoints/noobaiXLVpredv10.safetensors
+    --v_parameterization
+    --zero_terminal_snr
+    # Output, logging
+    --log_with=tensorboard
+    --seed=1728871242
+    # Dataset
+    --dataset_repeats=1
+    --resolution="1024,1024"
+    --enable_bucket
+    --bucket_reso_steps=64
+    --min_bucket_reso=256
+    --max_bucket_reso=2048
+    --flip_aug
+    --shuffle_caption
+    --cache_latents
+    --cache_latents_to_disk
+    --max_data_loader_n_workers=8
+    --persistent_data_loader_workers
+    # Network config
+    --network_dim=100000
+    # ⚠️  TODO: Plot
+    --network_alpha=64
+    --network_module="lycoris.kohya"
+    --network_args
+               "preset=full"
+               "conv_dim=100000"
+               "decompose_both=False"
+               "conv_alpha=64"
+               "rank_dropout=0"
+               "module_dropout=0"
+               "use_tucker=True"
+               "use_scalar=False"
+               "rank_dropout_scale=False"
+               "algo=lokr"
+               "bypass_mode=False"
+               "factor=16"
+               "dora_wd=True"
+               "train_norm=False"
+    --network_dropout=0
+    # Optimizer config
+    --optimizer_type=SPARKLES
+    --train_batch_size=14
+    #--gradient_accumulation_steps=1
+    --max_grad_norm=1
+    --gradient_checkpointing
+    #--scale_weight_norms=1
+    # LR Scheduling
+    --lr_warmup_steps=0
+    --learning_rate=0.0004
+    --unet_lr=0.0004
+    --text_encoder_lr=0.0001
+    --lr_scheduler="cosine"
+    --lr_scheduler_args="num_cycles=0.375"
+    # Noise
+    --multires_noise_iterations=12
+    --multires_noise_discount=0.4
+    #--min_snr_gamma=1
+    # Optimization, details
+    --no_half_vae
+    --sdpa
+    --mixed_precision="bf16"
+    --full_bf16  # Custom parameter to fully convert model to bf16
+    # Saving
+    --save_model_as="safetensors"
+    --save_precision="fp16"
+    --save_every_n_steps=100
+    # Sampling
+    --sample_every_n_steps=100
+    --sample_sampler="euler"
+    --sample_at_first
+    --caption_extension=".txt"
+)
+
+# ===== Environment Setup =====
+source "$HOME/toolkit/zsh/train_functions.zsh"
+# Setup variables and training arguments
+setup_training_vars "$NAME"
+args+=(    # Add the output and dataset arguments
+    --output_dir="$OUTPUT_DIR/$NAME"
+    --output_name="$NAME"
+    --log_prefix="$NAME-"
+    --logging_dir="$OUTPUT_DIR/logs"
+
+    --max_train_steps=$STEPS
+    --dataset_config="$TRAINING_DIR/config.toml"
+    #--train_data_dir="$TRAINING_DIR"
+    --sample_prompts="$TRAINING_DIR/sample-prompts.txt"
+    # script arguments
+    "$@"
+)
+
+LYCORIS_REPO=$(get_lycoris_repo)
+
+# Set cleanup trap for both error and normal exit
+trap cleanup_empty_output EXIT TERM
+# Copies the script itself and repositories' commits hashes to the output directory
+store_commits_hashes "$SD_REPO" "$LYCORIS_REPO"
+
+# Custom code to modify sd-scripts to support full bf16
+echo "Adding full bf16 support to sd-scripts..."
+PATCH_FILE="$HOME/source/repos/sd-scripts/bf16_patch.py"
+
+if [ ! -f "$PATCH_FILE" ]; then
+  cat > "$PATCH_FILE" << 'EOF'
+# Monkey patch to add full bf16 support
+import torch
+import argparse
+from typing import Optional
+
+# Store the original parse_args method
+original_parse_args = argparse.ArgumentParser.parse_args
+
+def patched_parse_args(self, *args, **kwargs):
+    # Get the parsed args from the original method
+    parsed_args = original_parse_args(self, *args, **kwargs)
+    
+    # Check if our custom flag is set
+    if hasattr(parsed_args, 'full_bf16') and parsed_args.full_bf16:
+        # Add a hook to convert the model to bf16 after it's loaded
+        original_create_model = getattr(parsed_args, '__create_model', None)
+        
+        def convert_to_bf16_hook(model):
+            print("Converting model to full bf16 precision...")
+            return model.to(torch.bfloat16)
+        
+        if original_create_model:
+            def wrapped_create_model(*args, **kwargs):
+                model = original_create_model(*args, **kwargs)
+                return convert_to_bf16_hook(model)
+            setattr(parsed_args, '__create_model', wrapped_create_model)
+        
+        print("Full bf16 mode enabled - model will be converted to bf16 after loading")
+    
+    return parsed_args
+
+# Apply the monkey patch
+argparse.ArgumentParser.parse_args = patched_parse_args
+
+# Add our custom argument to the relevant parsers
+def add_full_bf16_argument(parser):
+    parser.add_argument("--full_bf16", action="store_true", help="Convert the entire model to bf16 precision")
+
+# This will be imported by the training script
+def patch_argument_parser(parser):
+    add_full_bf16_argument(parser)
+    return parser
+EOF
+
+  # Create an init file to make it importable
+  touch "$HOME/source/repos/sd-scripts/bf16_patch__init__.py"
+  
+  # Add import to the main training script
+  MAIN_SCRIPT="$HOME/source/repos/sd-scripts/sdxl_train_network.py"
+  if [ -f "$MAIN_SCRIPT" ]; then
+    grep -q "import bf16_patch" "$MAIN_SCRIPT" || sed -i '1s/^/import bf16_patch\n/' "$MAIN_SCRIPT"
+    grep -q "bf16_patch.patch_argument_parser" "$MAIN_SCRIPT" || sed -i 's/def setup_parser():/def setup_parser():\n    parser = bf16_patch.patch_argument_parser(parser)/' "$MAIN_SCRIPT"
+  fi
+fi
+
+# ===== Run Training Script =====
+run_training_script "$SD_REPO/$SD_SCRIPT" "${args[@]}" 

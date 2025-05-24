@@ -1,0 +1,130 @@
+#!/usr/bin/env zsh
+set -e -o pipefail
+
+NAME=noob-solisolsoli-v102s1600                    # Name of the model to be trained (continued version)
+# Optional variables
+TRAINING_DIR="/home/kade/toolkit/diffusion/datasets/solisolsoli"                     # Directory containing dataset
+# STEPS=                                                  # Total training steps
+# OUTPUT_DIR=                                             # Directory for saving outputs
+
+SD_SCRIPT="${SD_SCRIPT:-sdxl_train_network.py}"           # Script for SDXL network training
+SD_REPO="${SD_REPO:-$HOME/toolkit/diffusion/sd-scripts}"  # Repository containing training scripts
+
+# alpha=1 @ dim=16 is the same lr than alpha=4 @ dim=256
+# --min_snr_gamma=1
+args=(
+    --debiased_estimation_loss                # Use debiased estimation in the loss calculation, reduces training time and improves quality
+    --max_token_length=225                    # Maximum token length for text encoders
+    # Keep Tokens
+    --keep_tokens=1                           # Number of tokens to keep at the beginning of caption
+    --keep_tokens_separator="|||"             # Separator for kept tokens
+    # Model
+    --pretrained_model_name_or_path=/home/kade/toolkit/diffusion/comfy/models/checkpoints/noobaiXLVpredv10.safetensors
+    --v_parameterization                      # Use v-parameterization for the model
+    --zero_terminal_snr                       # Enforce zero terminal SNR in the scheduler
+    # Network weights for continued training
+    #--network_weights=/home/kade/toolkit/diffusion/output_dir/noob-fd-saveus-v3s6000/noob-fd-saveus-v3s6000.safetensors    # Continue training from this LoRA
+    # Output, logging
+    --log_with=tensorboard                    # Use TensorBoard for logging
+    --seed=1728871242                         # Random seed for reproducibility
+    # Dataset
+    --dataset_repeats=1                       # Number of times to repeat the dataset
+    --resolution="1024,1024"                  # Training resolution (width,height)
+    --enable_bucket                           # Enable aspect ratio bucketing for images
+    --bucket_reso_steps=64                    # Resolution steps for bucketing (multiple of 64 for SDXL)
+    --min_bucket_reso=512                     # Minimum resolution for bucketing
+    --max_bucket_reso=2048                    # Maximum resolution for bucketing
+    #--random_crop                             # Use random cropping for image preprocessing
+    --flip_aug                                # Use horizontal flip augmentation
+    --shuffle_caption                         # Shuffle caption tokens during training
+    --cache_latents                           # Cache latents in memory to speed up training
+    --cache_latents_to_disk                   # Save cached latents to disk for faster restart
+    --max_data_loader_n_workers=8             # Maximum number of workers for data loading
+    --persistent_data_loader_workers          # Keep dataloader workers alive between epochs
+    # Network config
+    --network_dim=100000                      # Dimension of the LoRA network (higher = stronger effect)
+    --network_alpha=64                        # Alpha parameter for LoRA scaling (lower = more regularization)
+    --network_module="lycoris.kohya"          # Use LyCORIS network module from Kohya
+    --network_args                            # LyCORIS network arguments
+               "preset=attn-mlp"                  # Use the full preset for LyCORIS
+               "conv_dim=100000"              # Dimension for convolutional layers
+               "decompose_both=False"         # Don't decompose both directions
+               "conv_alpha=64"                # Alpha parameter for conv layers
+               "rank_dropout=0"               # No rank dropout
+               "module_dropout=0"             # No module dropout
+               "use_tucker=True"              # Use Tucker decomposition
+               "use_scalar=False"             # Don't use scalar parametrization
+               "rank_dropout_scale=False"     # Don't scale rank dropout
+               "algo=lokr"                    # Use LoKr algorithm (Low-rank Kronecker product)
+               "bypass_mode=False"            # Don't use bypass mode
+               "factor=16"                    # Factor for LoKr decomposition
+               "dora_wd=True"                 # Use weight decay in DoRA
+               "train_norm=False"             # Don't train norm layers
+    --network_dropout=0                       # Dropout for the network (0 = no dropout)
+    # Optimizer config
+    --optimizer_type=SPARKLES                 # Use SPARKLES optimizer
+    --train_batch_size=14                     # Batch size for training
+    --max_grad_norm=1                         # Maximum gradient norm for gradient clipping
+    --gradient_checkpointing                  # Use gradient checkpointing to save memory
+    #--scale_weight_norms=1                   # Scale weight norms to prevent exploding gradients
+    --gradient_accumulation_steps=1           # Number of steps for gradient accumulation
+    # LR Scheduling
+    #--lr_warmup_steps=300                     # Increased number of warmup steps
+    --learning_rate=0.0008                    # base learning rate
+    --unet_lr=0.0008                          # learning rate for UNet
+    --text_encoder_lr=0.0004                  # learning rate for text encoder
+    --lr_scheduler="cosine"                   # Cosine learning rate scheduler
+    --lr_scheduler_args="num_cycles=0.375"    # Cosine scheduler cycles
+    # Noise
+    --multires_noise_iterations=12            # Number of iterations for multi-resolution noise
+    --multires_noise_discount=0.4             # Discount factor for multi-res noise
+    #--min_snr_gamma=5                         # Minimum SNR gamma, balances high/low noise training
+    # Optimization, details
+    --full_bf16                               # Use bfloat16 precision for the entire model
+    #--torch_compile                           # Use PyTorch 2.0+ compilation for speed
+    #--dynamo_backend="inductor"               # Use inductor backend for torch.compile
+    --xformers
+    --no_half_vae                             # Don't use half precision for VAE, improves stability
+    --sdpa                                    # Use Scaled Dot Product Attention for better memory usage
+    --mixed_precision="bf16"                  # Use mixed precision training with bfloat16
+    # Saving
+    --save_model_as="safetensors"             # Save model in safetensors format
+    --save_precision="fp16"                   # Save model in fp16 precision
+    --save_every_n_steps=100                  # Save a checkpoint every 100 steps
+    # Sampling
+    --sample_every_n_steps=100                # Generate sample images every 100 steps
+    --sample_sampler="euler"                  # Use Euler sampler for image generation
+    --sample_at_first                         # Generate sample images at the start of training
+    --caption_extension=".txt"                # Extension for caption files
+)
+
+# ===== Environment Setup =====
+source "$HOME/toolkit/zsh/train_functions.zsh"
+# Setup variables and training arguments
+setup_training_vars "$NAME"
+args+=(    # Add the output and dataset arguments
+    --output_dir="$OUTPUT_DIR/$NAME"          # Directory for saving model checkpoints
+    --output_name="$NAME"                     # Base name for saved models
+    --log_prefix="$NAME-"                     # Prefix for log files
+    --logging_dir="$OUTPUT_DIR/logs"          # Directory for logs
+
+    # Only add max_train_steps if STEPS is defined and not empty
+    ${STEPS:+--max_train_steps=$STEPS}        # Maximum training steps (conditional)
+    
+    --dataset_config="$TRAINING_DIR/config.toml"  # Dataset configuration file
+    #--train_data_dir="$TRAINING_DIR"         # Directory containing training data
+    --sample_prompts="$TRAINING_DIR/sample-prompts.txt"  # Prompts for sample generation
+    # script arguments
+    "$@"
+)
+
+LYCORIS_REPO=$(get_lycoris_repo)
+
+# Set cleanup trap for both error and normal exit
+trap cleanup_empty_output EXIT TERM
+# Copies the script itself and repositories' commits hashes to the output directory
+store_commits_hashes "$SD_REPO" "$LYCORIS_REPO"
+
+# ===== Run Training Script =====
+run_training_script "$SD_REPO/$SD_SCRIPT" "${args[@]}"
+

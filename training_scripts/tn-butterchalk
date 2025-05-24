@@ -1,0 +1,124 @@
+#!/usr/bin/env zsh
+set -e -o pipefail
+
+NAME=noob-butterchalk-v3s1200
+TRAINING_DIR="/home/kade/toolkit/diffusion/datasets/_/by_butterchalk"
+# STEPS=
+# OUTPUT_DIR=
+
+SD_SCRIPT="${SD_SCRIPT:-sdxl_train_network.py}"
+SD_REPO="${SD_REPO:-$HOME/source/repos/sd-scripts}"
+
+# alpha=1 @ dim=16 is the same lr than alpha=4 @ dim=256
+# --min_snr_gamma=1
+args=(
+    # ⚠️  TODO: Benchmark...
+    --debiased_estimation_loss
+    # ⚠️  TODO: What does this do? Does it even work?
+    --max_token_length=225
+    # Keep Tokens
+    --keep_tokens=1
+    --keep_tokens_separator="|||"
+    # Model
+    --pretrained_model_name_or_path=/home/kade/ComfyUI/models/checkpoints/noobaiXLVpredv065s.safetensors
+    --v_parameterization
+    --zero_terminal_snr
+    # Output, logging
+    --log_with=tensorboard
+    --seed=1728871242
+    # Dataset
+    --dataset_repeats=1
+    --resolution="1024,1024"
+    --enable_bucket
+    --bucket_reso_steps=64
+    --min_bucket_reso=256
+    --max_bucket_reso=2048
+    --flip_aug
+    --shuffle_caption
+    --cache_latents
+    --cache_latents_to_disk
+    --max_data_loader_n_workers=8
+    --persistent_data_loader_workers
+    # Network config
+    --network_dim=100000
+    # ⚠️  TODO: Plot
+    --network_alpha=64
+    --network_module="lycoris.kohya"
+    --network_args
+               "preset=full"
+               "conv_dim=100000"
+               "decompose_both=False"
+               "conv_alpha=64"
+               "rank_dropout=0"
+               "module_dropout=0"
+               "use_tucker=True"
+               "use_scalar=False"
+               "rank_dropout_scale=False"
+               "algo=lokr"
+               "bypass_mode=False"
+               "factor=16"
+               "dora_wd=True"
+               "train_norm=False"
+    --network_dropout=0
+    # Optimizer config
+    --optimizer_type=ClybW
+    --train_batch_size=14
+    #--gradient_accumulation_steps=1
+    --max_grad_norm=1
+    --gradient_checkpointing
+    #--scale_weight_norms=1
+    # LR Scheduling
+    --lr_warmup_steps=0
+    --learning_rate=0.0003
+    --unet_lr=0.0003
+    --text_encoder_lr=0.00015
+    --lr_scheduler="cosine"
+    --lr_scheduler_args="num_cycles=0.375"
+    # Noise
+    --multires_noise_iterations=12
+    --multires_noise_discount=0.4
+    #--min_snr_gamma=1
+    # Optimization, details
+    --no_half_vae
+    --sdpa
+    --mixed_precision="bf16"
+    # Saving
+    --save_model_as="safetensors"
+    --save_precision="fp16"
+    --save_every_n_steps=100
+    # Sampling
+    --sample_every_n_steps=100
+    --sample_sampler="euler"
+    --sample_at_first
+    --caption_extension=".txt"
+)
+
+# ===== Environment Setup =====
+source "$HOME/toolkit/zsh/train_functions.zsh"
+# Setup variables and training arguments
+setup_training_vars "$NAME"
+args+=(    # Add the output and dataset arguments
+    --output_dir="$OUTPUT_DIR/$NAME"
+    --output_name="$NAME"
+    --log_prefix="$NAME-"
+    --logging_dir="$OUTPUT_DIR/logs"
+
+    --max_train_steps=$STEPS
+    --dataset_config="$TRAINING_DIR/config.toml"
+    #--train_data_dir="$TRAINING_DIR"
+    --sample_prompts="$TRAINING_DIR/sample-prompts.txt"
+    # script arguments
+    "$@"
+)
+
+setup_conda_env "sdscripts"
+LYCORIS_REPO=$(get_lycoris_repo)
+
+# Set cleanup trap for both error and normal exit
+trap cleanup_empty_output EXIT TERM
+# Copies the script itself and repositories' commits hashes to the output directory
+store_commits_hashes "$SD_REPO" "$LYCORIS_REPO"
+
+# ===== Run Training Script =====
+run_training_script "$SD_REPO/$SD_SCRIPT" "${args[@]}"
+

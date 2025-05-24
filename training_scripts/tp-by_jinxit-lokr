@@ -1,0 +1,137 @@
+#!/usr/bin/env zsh
+#
+# NOTE:
+# - Changed the compression factor of the LoKr.
+# 
+# >>> conda initialize >>>
+# !! Contents within this block are managed by 'conda init' !!
+__conda_setup="$('/home/kade/miniconda3/bin/conda' 'shell.zsh' 'hook' 2> /dev/null)"
+if [ $? -eq 0 ]; then
+    eval "$__conda_setup"
+else
+    if [ -f "/home/kade/miniconda3/etc/profile.d/conda.sh" ]; then
+        . "/home/kade/miniconda3/etc/profile.d/conda.sh"
+    else
+        export PATH="/home/kade/miniconda3/bin:$PATH"
+    fi
+fi
+unset __conda_setup
+# <<< conda initialize <
+
+conda activate sdscripts
+
+NAME="by_jinxit-v3s6400"
+TRAINING_DIR="/home/kade/toolkit/diffusion/datasets/by_jinxit"
+OUTPUT_DIR="/home/kade/output_dir"
+
+# Extract the number of steps from the NAME
+STEPS=$(echo $NAME | grep -oE '[0-9]+$')
+
+# If no number is found at the end of NAME, set a default value
+if [ -z "$STEPS" ]; then
+    STEPS=4096
+    echo "No step count found in NAME. Using default value of \e[35m$STEPS\e[0m"
+else
+    echo "Extracted \e[35m$STEPS\e[0m steps from NAME"
+fi
+
+# alpha=1 @ dim=16 is the same lr than alpha=4 @ dim=256
+# --min_snr_gamma=1
+args=(
+    # ⚠️  TODO: Benchmark...
+    --debiased_estimation_loss
+    # ⚠️  TODO: What does this do? Does it even work?
+    --max_token_length=225
+    # Keep Tokens
+    --keep_tokens=1
+    --keep_tokens_separator="|||"
+    # Model
+    --pretrained_model_name_or_path=/home/kade/ComfyUI/models/checkpoints/ponyDiffusionV6XL_v6StartWithThisOne.safetensors
+    # Output, logging
+    --output_dir="$OUTPUT_DIR/$NAME"
+    --output_name="$NAME"
+    --log_prefix="$NAME-"
+    --log_with=tensorboard
+    --logging_dir="$OUTPUT_DIR/logs"
+    --seed=1728871242
+    # Dataset
+    --train_data_dir="$TRAINING_DIR"
+    --dataset_repeats=1
+    --resolution="1024,1024"
+    --enable_bucket
+    --bucket_reso_steps=64
+    --min_bucket_reso=256
+    --max_bucket_reso=2048
+    --flip_aug
+    --shuffle_caption
+    --cache_latents
+    --cache_latents_to_disk
+    --max_data_loader_n_workers=8
+    --persistent_data_loader_workers
+    # Network config
+    --network_dim=100000
+    # ⚠️  TODO: Plot
+    --network_alpha=64
+    --network_module="lycoris.kohya"
+    --network_args
+               "preset=full"
+               "conv_dim=100000"
+               "decompose_both=False"
+               "conv_alpha=64"
+               "rank_dropout=0"
+               "module_dropout=0"
+               "use_tucker=False"
+               "use_scalar=False"
+               "rank_dropout_scale=False"
+               "algo=lokr"
+               "bypass_mode=False"
+               "factor=16"
+               "use_cp=True"
+               "dora_wd=True"
+               "train_norm=False"
+    --network_dropout=0
+    # Optimizer config
+    --optimizer_type=FCompass
+    --train_batch_size=8
+    --gradient_accumulation_steps=6
+    --max_grad_norm=1
+    --gradient_checkpointing
+    --lr_warmup_steps=0
+    #--scale_weight_norms=1
+    # LR Scheduling
+    --max_train_steps=$STEPS
+    --learning_rate=0.0005
+    --unet_lr=0.0002
+    --text_encoder_lr=0.0001
+    --lr_scheduler="cosine"
+    --lr_scheduler_args="num_cycles=0.375"
+    # Noise
+    --multires_noise_iterations=12
+    --multires_noise_discount=0.4
+    #--min_snr_gamma=1
+    # Optimization, details
+    --no_half_vae
+    --sdpa
+    --mixed_precision="bf16"
+    # Saving
+    --save_model_as="safetensors"
+    --save_precision="fp16"
+    --save_every_n_steps=100
+    # Saving States
+    #--save_state
+    # Either resume from a saved state
+    #--resume="$OUTPUT_DIR/wolflink-vfucks400" # Resume from saved state
+    #--skip_until_initial_step
+    # Or from a checkpoint
+    #--network_weights="$OUTPUT_DIR/wolflink-vfucks400/wolflink-vfucks400-step00000120.safetensors" # Resume from checkpoint (not needed with state, i think)
+    #--initial_step=120
+    # Sampling
+    --sample_every_n_steps=200
+    --sample_prompts="$TRAINING_DIR/sample-prompts.txt"
+    --sample_sampler="euler_a"
+    --caption_extension=".txt"
+)
+cd ~/source/repos/sd-scripts
+#accelerate launch --num_cpu_threads_per_process=2
+python "./sdxl_train_network.py" "${args[@]}"
+cd ~

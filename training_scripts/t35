@@ -1,0 +1,110 @@
+#!/usr/bin/env zsh
+set -e -o pipefail
+
+NAME="_-v5s80000"
+
+SD_SCRIPT="${SD_SCRIPT:-sd3_train.py}"
+SD_REPO="${SD_REPO:-$HOME/source/repos/sd-scripts}"
+
+# alpha=1 @ dim=16 is the same lr than alpha=4 @ dim=256
+args=(
+    #--gradient_accumulation_steps=2
+    --save_state
+    ####
+    --train_text_encoder
+    --use_t5xxl_cache_only
+    --cache_text_encoder_outputs_to_disk
+    --learning_rate_te1=0.000002
+    --learning_rate_te2=0.000002
+    # wth kohya! it counts in layers not blocks, has to be a multiple of 12 (layers per block)
+    --num_last_block_to_freeze=96 # 8 blocks
+    ####
+    # Requires an arugument 🐺
+    #--pos_emb_random_crop_rate
+    --clip_g_dropout_rate=0.0
+    --t5_dropout_rate=0.0
+    #--enable_scaled_pos_embed
+    # Keep Tokens
+    --keep_tokens=1
+    --keep_tokens_separator="|||"
+    # Model
+    #--pretrained_model_name_or_path=/home/kade/ComfyUI/models/checkpoints/sd3.5_large.safetensors
+    --pretrained_model_name_or_path=/home/kade/ComfyUI/models/checkpoints/sd3.5_medium.safetensors
+    --clip_l=/home/kade/ComfyUI/models/clip/clip_l.safetensors
+    --clip_g=/home/kade/ComfyUI/models/clip/clip_g.safetensors
+    --t5xxl=/home/kade/ComfyUI/models/clip/t5xxl_fp16.safetensors
+    # Output, logging
+    --log_with=tensorboard
+    --seed=1728871242
+    --fp8_base
+    # Dataset
+    --dataset_repeats=1
+    --resolution="512,512"
+    #--resolution="1024,1024"
+    --enable_bucket
+    --bucket_reso_steps=64
+    --min_bucket_reso=128
+    --max_bucket_reso=2048
+    #--flip_aug
+    --shuffle_caption
+    --cache_latents
+    --cache_latents_to_disk
+    --max_data_loader_n_workers=8
+    --persistent_data_loader_workers
+    # Optimizer config
+    --optimizer_type=AdamW8bit
+    #--optimizer_type=ClybW
+    --max_grad_norm=0.01
+    --gradient_checkpointing
+    # LR Scheduling
+    #--lr_warmup_steps=200
+    # NOTE: 0.0004 if its anything like FLUX..
+    --learning_rate=0.000002
+    --lr_scheduler="constant"
+    #--lr_scheduler="cosine"
+    #--lr_scheduler_args="num_cycles=0.375"
+    # Noise
+    # --multires_noise_iterations=12
+    # --multires_noise_discount=0.4
+    # Optimization, details
+    --sdpa
+    --mixed_precision="bf16"
+    # Saving
+    --save_model_as="safetensors"
+    --save_precision="bf16"
+    --save_every_n_steps=500
+    # Sampling
+    --sample_every_n_steps=200
+    --sample_sampler="euler_a"
+    #--sample_at_first
+    --caption_extension=".txt"
+)
+
+# ===== Environment Setup =====
+source "$HOME/toolkit/zsh/train_functions.zsh"
+# Setup variables and training arguments
+setup_training_vars "$NAME"
+args+=( # Add the output and dataset arguments
+    --output_dir="$OUTPUT_DIR/$NAME"
+    --output_name="$NAME"
+    --log_prefix="$NAME-"
+    --logging_dir="$OUTPUT_DIR/logs"
+
+    --max_train_steps=$STEPS
+    --dataset_config="$TRAINING_DIR/config.toml"
+    #--train_data_dir="$TRAINING_DIR"
+    --sample_prompts="$TRAINING_DIR/sample-prompts.txt"
+    # script arguments
+    "$@"
+)
+
+setup_conda_env "sdscripts"
+LYCORIS_REPO=$(get_lycoris_repo)
+
+# Set cleanup trap for both error and normal exit
+trap cleanup_empty_output EXIT TERM
+# Copies the script itself and repositories' commits hashes to the output directory
+store_commits_hashes "$SD_REPO" "$LYCORIS_REPO"
+
+# ===== Run Training Script =====
+run_training_script "$SD_REPO/$SD_SCRIPT" "${args[@]}"

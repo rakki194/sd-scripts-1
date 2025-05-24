@@ -1,0 +1,111 @@
+#!/usr/bin/env zsh
+#
+# >>> conda initialize >>>
+# !! Contents within this block are managed by 'conda init' !!
+__conda_setup="$('/home/kade/miniconda3/bin/conda' 'shell.zsh' 'hook' 2> /dev/null)"
+if [ $? -eq 0 ]; then
+    eval "$__conda_setup"
+else
+    if [ -f "/home/kade/miniconda3/etc/profile.d/conda.sh" ]; then
+        . "/home/kade/miniconda3/etc/profile.d/conda.sh"
+    else
+        export PATH="/home/kade/miniconda3/bin:$PATH"
+    fi
+fi
+unset __conda_setup
+# <<< conda initialize <
+
+conda activate sdscripts
+
+NAME="asmongold-v2s2000"
+TRAINING_DIR="/home/kade/toolkit/diffusion/datasets/_/asmongold"
+OUTPUT_DIR="/home/kade/output_dir/flux-$NAME"
+
+# Extract the number of steps from the NAME
+STEPS=$(echo $NAME | grep -oE '[0-9]+$')
+
+# If no number is found at the end of NAME, set a default value
+if [ -z "$STEPS" ]; then
+    STEPS=4096
+    echo "No step count found in NAME. Using default value of \e[35m$STEPS\e[0m"
+else
+    echo "Extracted \e[35m$STEPS\e[0m steps from NAME"
+fi
+
+args=(
+    ## Model Paths
+    --pretrained_model_name_or_path ~/ComfyUI/models/unet/flux1-dev-fp8.safetensors
+    --clip_l ~/ComfyUI/models/clip/clip_l.safetensors
+    --t5xxl ~/ComfyUI/models/clip/t5xxl_fp16.safetensors
+    --ae ~/ComfyUI/models/vae/ae.safetensors
+    ## Network Arguments
+    # NOTE: Bad idea to train T5!
+    #--network_args
+    #    "train_t5xxl=True"
+    ## Timestep Sampling
+    --timestep_sampling shift
+    # `--discrete_flow_shift` is the discrete flow shift for the Euler Discrete Scheduler,
+    # default is 3.0 (same as SD3).
+    --discrete_flow_shift 3.1582
+    # `--model_prediction_type` is how to interpret and process the model prediction.
+    #   * `raw`: use as is, same as x-flux
+    #   * `additive`: add to noisy input
+    #   * `sigma_scaled`: apply sigma scaling, same as SD3
+    --model_prediction_type raw
+    --guidance_scale 1.0
+    # NOTE: In kohya's experiments,
+    # `--timestep_sampling shift --discrete_flow_shift 3.1582 --model_prediction_type raw --guidance_scale 1.0`
+    # (with the default `l2` `loss_type`) seems to work better.
+    #
+    # NOTE: The existing `--loss_type` option may be useful for FLUX.1 training. The default is `l2`.
+    #--loss_type l2
+    #
+    # Latents
+    --cache_latents_to_disk
+    --save_model_as safetensors
+    --sdpa
+    --persistent_data_loader_workers
+    --max_data_loader_n_workers 2
+    --seed 42
+    --max_train_steps=$STEPS
+    --gradient_checkpointing
+    --mixed_precision bf16
+    --optimizer_type=ClybW
+    --save_precision bf16
+    --network_module="lycoris.kohya"
+    --network_args
+               "preset=full"
+               "conv_dim=100000"
+               "decompose_both=False"
+               "conv_alpha=64"
+               "rank_dropout=0"
+               "module_dropout=0"
+               "use_tucker=True"
+               "use_scalar=False"
+               "rank_dropout_scale=False"
+               "algo=lokr"
+               "bypass_mode=False"
+               "factor=64"
+               "dora_wd=True"
+               "train_norm=False"
+    --network_dim 1000000
+    --learning_rate 3e-4
+    --cache_text_encoder_outputs
+    --cache_text_encoder_outputs_to_disk
+    --fp8_base
+    --highvram
+    --dataset_config "$TRAINING_DIR/config.toml"
+    --output_dir $OUTPUT_DIR
+    --output_name $NAME
+    ## Sample Prompts
+    --sample_prompts="$TRAINING_DIR/sample-prompts.txt"
+    --sample_every_n_steps=20 
+    --sample_sampler="euler" 
+    --sample_at_first 
+    --save_every_n_steps=100
+)
+
+cd ~/source/repos/sd-scripts
+python "./flux_train_network.py" "${args[@]}"
+cd ~
+
