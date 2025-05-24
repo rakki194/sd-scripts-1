@@ -1,4 +1,5 @@
 import argparse
+import numpy as np
 
 import torch
 from library.device_utils import init_ipex, clean_memory_on_device
@@ -179,6 +180,19 @@ if __name__ == "__main__":
     args = parser.parse_args()
     train_util.verify_command_line_training_args(args)
     args = train_util.read_config_from_file(args, parser)
+
+    # --- DETERMINISM PATCH START ---
+    if hasattr(args, 'seed') and args.seed is not None:
+        np.random.seed(args.seed)
+        try:
+            import torch
+            torch.use_deterministic_algorithms(True, warn_only=True)
+            if hasattr(torch.backends, 'cudnn'):
+                torch.backends.cudnn.deterministic = True
+                torch.backends.cudnn.benchmark = False
+        except Exception as e:
+            print(f"[Warning] Could not set full determinism: {e}")
+    # --- DETERMINISM PATCH END ---
 
     trainer = SdxlNetworkTrainer()
     trainer.train(args)
