@@ -118,10 +118,36 @@ def benchmark_pytorch_bfloat16(size=10**7, n_iters=100):
     pt_time = time.time() - start
     print(f"PyTorch bfloat16 implementation: {pt_time:.4f} s total, {pt_time/n_iters*1000:.4f} ms/iter")
 
+def optimizer_like_benchmark(size=10**7, n_iters=100, shape=(4096, 256)):
+    print(f"\nOptimizer-like benchmark with shape: {shape}, iterations: {n_iters}")
+    # Simulate parameter, EMA, and gradient state tensors
+    param = torch.randn(*shape, device='cuda', dtype=torch.bfloat16)
+    grad = torch.randn(*shape, device='cuda', dtype=torch.float32)
+    ema = torch.zeros_like(param)
+    ema2 = torch.zeros_like(param)
+
+    # Simulate a typical optimizer step: update param, ema, ema2
+    torch.cuda.synchronize()
+    start = time.time()
+    for _ in range(n_iters):
+        # Simulate: param = param - lr * grad (in float32, then stochastic copy to bf16)
+        tmp = param.float() - 0.001 * grad
+        cuda_copy_stochastic_bf16_(param, tmp)
+        # Simulate: ema = 0.9 * ema + 0.1 * param (in float32, then stochastic copy to bf16)
+        tmp_ema = 0.9 * ema.float() + 0.1 * param.float()
+        cuda_copy_stochastic_bf16_(ema, tmp_ema)
+        # Simulate: ema2 = 0.99 * ema2 + 0.01 * (grad ** 2) (in float32, then stochastic copy to bf16)
+        tmp_ema2 = 0.99 * ema2.float() + 0.01 * (grad ** 2)
+        cuda_copy_stochastic_bf16_(ema2, tmp_ema2)
+    torch.cuda.synchronize()
+    elapsed = time.time() - start
+    print(f"Optimizer-like CUDA bfloat16: {elapsed:.4f} s total, {elapsed/n_iters*1000:.4f} ms/iter")
+
 if __name__ == "__main__":
     test_bfloat16_vs_pytorch()
     test_edge_cases()
     test_random_large()
     test_noncontiguous()
     benchmark_copy_stochastic_bf16()
-    benchmark_pytorch_bfloat16() 
+    benchmark_pytorch_bfloat16()
+    optimizer_like_benchmark() 

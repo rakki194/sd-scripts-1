@@ -28,25 +28,25 @@ __global__ void copy_stochastic_cuda_kernel_vec4(
     }
 }
 
-// bfloat16 stochastic rounding kernel (bit-manipulation, matches Python)
+// Optimized bfloat16 stochastic rounding kernel
 __global__ void copy_stochastic_bf16_cuda_kernel(
     __nv_bfloat16* __restrict__ target, const float* __restrict__ source, int64_t numel, uint64_t seed)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < numel) {
-        float src = source[idx];
+        float src = __ldg(&source[idx]);
         int32_t src_bits = __float_as_int(src);
-        if (isnan(src)) {
-            target[idx] = __float2bfloat16(NAN);
-        } else if (isinf(src)) {
-            target[idx] = __float2bfloat16(src);
-        } else {
+        if (isfinite(src)) {
             uint32_t rand_state = static_cast<uint32_t>(seed) ^ static_cast<uint32_t>(idx);
             uint32_t rand16 = xorshift32(rand_state) & 0xFFFF;
             int32_t result = src_bits + rand16;
             result &= 0xFFFF0000;
             float rounded = __int_as_float(result);
             target[idx] = __float2bfloat16(rounded);
+        } else if (isnan(src)) {
+            target[idx] = __float2bfloat16(NAN);
+        } else {
+            target[idx] = __float2bfloat16(src);
         }
     }
 }
@@ -55,7 +55,7 @@ __global__ void copy_stochastic_bf16_cuda_kernel(
 void copy_stochastic_cuda_launcher(
     float* target, const float* source, int64_t numel, uint64_t seed, cudaStream_t stream)
 {
-    int threads = 1024;
+    int threads = 512;
     int vec = 4;
     int blocks = (numel + threads * vec - 1) / (threads * vec);
     copy_stochastic_cuda_kernel_vec4<<<blocks, threads, 0, stream>>>(
@@ -63,11 +63,11 @@ void copy_stochastic_cuda_launcher(
     );
 }
 
-// C++-style launcher for bfloat16
+// C++-style launcher for bfloat16 (optimized)
 void copy_stochastic_bf16_cuda_launcher(
     __nv_bfloat16* target, const float* source, int64_t numel, uint64_t seed, cudaStream_t stream)
 {
-    int threads = 1024;
+    int threads = 512; // Try 256, 512, 1024 for best performance on your GPU
     int blocks = (numel + threads - 1) / threads;
     copy_stochastic_bf16_cuda_kernel<<<blocks, threads, 0, stream>>>(
         target, source, numel, seed
