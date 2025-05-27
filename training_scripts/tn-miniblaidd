@@ -2,9 +2,9 @@
 set -e -o pipefail
 
 # Ensure deterministic CuBLAS for PyTorch
-export CUBLAS_WORKSPACE_CONFIG=:4096:8
+#export CUBLAS_WORKSPACE_CONFIG=:4096:8
 
-NAME=noob-sparkles-miniblaidd-v20s30                    # Name of the model to be trained (continued version)
+NAME=noob-sparkles-miniblaidd-v34s30                    # Name of the model to be trained (continued version)
 # Optional variables
 TRAINING_DIR="/home/kade/datasets/miniblaidd"                     # Directory containing dataset
 # STEPS=                                                  # Total training steps
@@ -16,7 +16,7 @@ SD_REPO="${SD_REPO:-$HOME/sd-scripts}"  # Repository containing training scripts
 # alpha=1 @ dim=16 is the same lr than alpha=4 @ dim=256
 # --min_snr_gamma=1
 args=(
-    --determinism                            # Enable strict determinism
+    #--determinism                            # Enable strict determinism
     #--scale_mse_loss 0.111111                 # Scale MSE loss by 0.111111
     --debiased_estimation_loss                # Use debiased estimation in the loss calculation, reduces training time and improves quality
     --max_token_length=225                    # Maximum token length for text encoders

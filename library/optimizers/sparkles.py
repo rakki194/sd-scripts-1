@@ -406,14 +406,11 @@ class SPARKLES(Optimizer):
                     update.clamp_(-clip, clip)
 
                 # Update parameters with stochastic BF16 rounding
-                seed = deterministic_seed
-                if seed is not None:
-                    param_seed = int(seed) + state["step"] + hash(p) % 100000
-                    # Only print for the first parameter in the first step to avoid spam
-                    if state["step"] == 1 and i == 0:
-                        print(f"[SPARKLES] param_seed for first param, step 1: {param_seed}")
+                if deterministic_seed is not None:
+                    param_seed = int(deterministic_seed) + state["step"] + hash(p) % 100000
                 else:
-                    param_seed = None
+                    # Use a random seed for non-deterministic mode
+                    param_seed = torch.randint(0, 2**31, ()).item()
                 if (
                     p.dtype == torch.bfloat16 and p.is_cuda and
                     ema.dtype == torch.bfloat16 and ema.is_cuda and
