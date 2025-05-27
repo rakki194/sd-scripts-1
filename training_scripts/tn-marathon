@@ -1,6 +1,12 @@
 #!/usr/bin/env zsh
 set -e -o pipefail
 
+export PYTHONPATH=$PYTHONPATH:/home/kade/sd-scripts/library/optimizers
+export CFLAGS='-DGLOG_USE_GLOG_EXPORT'
+export CCFLAGS='-DGLOG_USE_GLOG_EXPORT'
+export NVCC_APPEND_FLAGS='-DGLOG_USE_GLOG_EXPORT'
+export CXXFLAGS='-DGLOG_USE_GLOG_EXPORT'
+
 # Ensure deterministic CuBLAS for PyTorch
 #export CUBLAS_WORKSPACE_CONFIG=:4096:8
 

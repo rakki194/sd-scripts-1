@@ -2,11 +2,14 @@
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime_api.h>
+#include <cuda_bf16.h>
 #include <chrono>
 
-// Declare the launcher from the .cu file
+// Declare the launchers from the .cu file
 void copy_stochastic_cuda_launcher(
     float* target, const float* source, int64_t numel, uint64_t seed, cudaStream_t stream);
+void copy_stochastic_bf16_cuda_launcher(
+    __nv_bfloat16* target, const float* source, int64_t numel, uint64_t seed, cudaStream_t stream);
 
 void copy_stochastic_cuda(
     at::Tensor target, at::Tensor source)
@@ -29,6 +32,28 @@ void copy_stochastic_cuda(
     );
 }
 
+// New: bfloat16 binding
+void copy_stochastic_bf16_cuda(
+    at::Tensor target, at::Tensor source)
+{
+    TORCH_CHECK(target.is_cuda(), "target must be a CUDA tensor");
+    TORCH_CHECK(source.is_cuda(), "source must be a CUDA tensor");
+    TORCH_CHECK(target.numel() == source.numel(), "Tensors must have same number of elements");
+    TORCH_CHECK(target.scalar_type() == at::kBFloat16, "target must be bfloat16");
+    TORCH_CHECK(source.scalar_type() == at::kFloat, "source must be float32");
+
+    uint64_t seed = std::chrono::system_clock::now().time_since_epoch().count();
+
+    copy_stochastic_bf16_cuda_launcher(
+        reinterpret_cast<__nv_bfloat16*>(target.data_ptr<at::BFloat16>()),
+        source.data_ptr<float>(),
+        target.numel(),
+        seed,
+        at::cuda::getCurrentCUDAStream()
+    );
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("copy_stochastic_cuda", &copy_stochastic_cuda, "Stochastic copy (CUDA)");
+    m.def("copy_stochastic_bf16_cuda", &copy_stochastic_bf16_cuda, "Stochastic copy to bfloat16 (CUDA)");
 } 

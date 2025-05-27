@@ -1,6 +1,7 @@
 #include <cuda.h>
 #include <curand_kernel.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <cuda_bf16.h>
 
 __device__ uint32_t xorshift32(uint32_t x) {
     x ^= x << 13;
@@ -27,7 +28,21 @@ __global__ void copy_stochastic_cuda_kernel_vec4(
     }
 }
 
-// C++-style launcher
+// New: bfloat16 stochastic rounding kernel
+__global__ void copy_stochastic_bf16_cuda_kernel(
+    __nv_bfloat16* __restrict__ target, const float* __restrict__ source, int64_t numel, uint64_t seed)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < numel) {
+        uint32_t rand_state = static_cast<uint32_t>(seed) ^ static_cast<uint32_t>(idx);
+        // 7 bits for bfloat16 mantissa
+        float noise = (xorshift32(rand_state) & 0x7F) * (1.0f / 128.0f); // [0, 1)
+        float rounded = source[idx] + noise;
+        target[idx] = __float2bfloat16(rounded);
+    }
+}
+
+// C++-style launcher for float32
 void copy_stochastic_cuda_launcher(
     float* target, const float* source, int64_t numel, uint64_t seed, cudaStream_t stream)
 {
@@ -35,6 +50,17 @@ void copy_stochastic_cuda_launcher(
     int vec = 4;
     int blocks = (numel + threads * vec - 1) / (threads * vec);
     copy_stochastic_cuda_kernel_vec4<<<blocks, threads, 0, stream>>>(
+        target, source, numel, seed
+    );
+}
+
+// C++-style launcher for bfloat16
+void copy_stochastic_bf16_cuda_launcher(
+    __nv_bfloat16* target, const float* source, int64_t numel, uint64_t seed, cudaStream_t stream)
+{
+    int threads = 1024;
+    int blocks = (numel + threads - 1) / threads;
+    copy_stochastic_bf16_cuda_kernel<<<blocks, threads, 0, stream>>>(
         target, source, numel, seed
     );
 } 

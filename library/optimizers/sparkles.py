@@ -1,10 +1,8 @@
 import torch
 from torch.optim import Optimizer
 from typing import Callable, Optional, Tuple
-import random
 
-
-# @torch.compile
+# Define the pure Python version first
 def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
     """
     Apply stochastic rounding by manipulating bits in the mantissa.
@@ -31,7 +29,6 @@ def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
 
         # copy the higher 16 bit into the target tensor
         target.copy_(result.view(dtype=torch.float32))
-
 
 class SPARKLES(Optimizer):
     r"""
@@ -426,12 +423,12 @@ class SPARKLES(Optimizer):
                 # Already BF16, convert to float32 temporarily for bit manipulation
                 x_fp32 = x.to(torch.float32)
                 result = torch.empty_like(x)
-                copy_stochastic_(result, x_fp32)
+                copy_stochastic_dispatch(result, x_fp32)
                 return result
             else:
                 # Create new tensor in BF16 format
                 result = torch.empty_like(x, dtype=torch.bfloat16)
-                copy_stochastic_(result, x)
+                copy_stochastic_dispatch(result, x)
                 return result
         else:
             # Use the original noise-based method
@@ -602,9 +599,8 @@ class SPARKLES(Optimizer):
                 # Apply stochastic BF16 rounding if enabled
                 if p.dtype == torch.bfloat16:
                     if use_stochastic_rounding:
-                        # Apply stochastic rounding when converting back to BF16
                         (
-                            copy_stochastic_(p.data, p_fp32)
+                            copy_stochastic_dispatch(p.data, p_fp32)
                             if use_bit_manipulation
                             else p.data.copy_(
                                 self.apply_stochastic_bf16_rounding(
@@ -626,7 +622,7 @@ class SPARKLES(Optimizer):
                 if prev_grad.dtype == torch.bfloat16:
                     if use_stochastic_rounding:
                         (
-                            copy_stochastic_(prev_grad, grad_fp32)
+                            copy_stochastic_dispatch(prev_grad, grad_fp32)
                             if use_bit_manipulation
                             else prev_grad.copy_(
                                 self.apply_stochastic_bf16_rounding(
@@ -646,7 +642,7 @@ class SPARKLES(Optimizer):
                 if ema.dtype == torch.bfloat16:
                     if use_stochastic_rounding:
                         (
-                            copy_stochastic_(ema, ema_fp32)
+                            copy_stochastic_dispatch(ema, ema_fp32)
                             if use_bit_manipulation
                             else ema.copy_(
                                 self.apply_stochastic_bf16_rounding(
@@ -665,7 +661,7 @@ class SPARKLES(Optimizer):
                 if ema_squared.dtype == torch.bfloat16:
                     if use_stochastic_rounding:
                         (
-                            copy_stochastic_(ema_squared, ema_squared_fp32)
+                            copy_stochastic_dispatch(ema_squared, ema_squared_fp32)
                             if use_bit_manipulation
                             else ema_squared.copy_(
                                 self.apply_stochastic_bf16_rounding(
