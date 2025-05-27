@@ -28,17 +28,26 @@ __global__ void copy_stochastic_cuda_kernel_vec4(
     }
 }
 
-// New: bfloat16 stochastic rounding kernel
+// bfloat16 stochastic rounding kernel (bit-manipulation, matches Python)
 __global__ void copy_stochastic_bf16_cuda_kernel(
     __nv_bfloat16* __restrict__ target, const float* __restrict__ source, int64_t numel, uint64_t seed)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < numel) {
-        uint32_t rand_state = static_cast<uint32_t>(seed) ^ static_cast<uint32_t>(idx);
-        // 7 bits for bfloat16 mantissa
-        float noise = (xorshift32(rand_state) & 0x7F) * (1.0f / 128.0f); // [0, 1)
-        float rounded = source[idx] + noise;
-        target[idx] = __float2bfloat16(rounded);
+        float src = source[idx];
+        int32_t src_bits = __float_as_int(src);
+        if (isnan(src)) {
+            target[idx] = __float2bfloat16(NAN);
+        } else if (isinf(src)) {
+            target[idx] = __float2bfloat16(src);
+        } else {
+            uint32_t rand_state = static_cast<uint32_t>(seed) ^ static_cast<uint32_t>(idx);
+            uint32_t rand16 = xorshift32(rand_state) & 0xFFFF;
+            int32_t result = src_bits + rand16;
+            result &= 0xFFFF0000;
+            float rounded = __int_as_float(result);
+            target[idx] = __float2bfloat16(rounded);
+        }
     }
 }
 

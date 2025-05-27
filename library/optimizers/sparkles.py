@@ -31,24 +31,17 @@ def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
         target.copy_(result.view(dtype=torch.float32))
 
 try:
-    from .copy_stochastic_cuda_wrapper import copy_stochastic_ as cuda_copy_stochastic_
     from .copy_stochastic_cuda_wrapper import copy_stochastic_bf16_ as cuda_copy_stochastic_bf16_
 except ImportError:
-    from copy_stochastic_cuda_wrapper import copy_stochastic_ as cuda_copy_stochastic_
     from copy_stochastic_cuda_wrapper import copy_stochastic_bf16_ as cuda_copy_stochastic_bf16_
 
 # Save the original Python version
 py_copy_stochastic_ = copy_stochastic_
 
 def copy_stochastic_dispatch(target: torch.Tensor, source: torch.Tensor):
-    # Use CUDA kernels exclusively for CUDA tensors
-    if target.is_cuda and source.is_cuda:
-        if target.dtype == torch.float32 and source.dtype == torch.float32:
-            cuda_copy_stochastic_(target, source)
-        elif target.dtype == torch.bfloat16 and source.dtype == torch.float32:
-            cuda_copy_stochastic_bf16_(target, source)
-        else:
-            raise ValueError("Unsupported dtype combination for CUDA stochastic copy.")
+    # Only support CUDA bfloat16 path
+    if target.is_cuda and source.is_cuda and target.dtype == torch.bfloat16 and source.dtype == torch.float32:
+        cuda_copy_stochastic_bf16_(target, source)
     else:
         py_copy_stochastic_(target, source)
 
