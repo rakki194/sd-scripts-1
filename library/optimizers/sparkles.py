@@ -33,8 +33,7 @@ class SPARKLES(Optimizer):
     5. Stochastic Update Strategy:
        - When gradients become small between iterations (||g_t - g_{t-1}|| < threshold),
          apply stochastic operator R to the updates to escape potential local minima
-       - The stochastic operator randomly rearranges the gradients without changing their magnitude
-       - Various permutation strategies are available: global (default), magnitude-aware, local neighborhood, and adaptive
+       - The permutation strategy can be set to either 'global' (randomly permutes all elements) or 'none' (no permutation)
 
     6. Stochastic BF16 Rounding (Enabled by default):
        - Applies controlled stochastic noise during bfloat16 conversion
@@ -91,13 +90,7 @@ class SPARKLES(Optimizer):
         use_bit_manipulation (bool, optional):
             Whether to use bit manipulation for stochastic rounding (default: True).
         permutation_strategy (str, optional):
-            Which permutation strategy to use ('global', 'magnitude', 'local', 'adaptive') (default: 'global').
-        magnitude_bands (int, optional):
-            Number of magnitude bands for magnitude-aware shuffling (default: 5).
-        local_neighborhood_size (float, optional):
-            Size of local neighborhood as fraction of tensor size (default: 0.1).
-        adaptive_scale_factor (float, optional):
-            Scaling factor for adaptive permutation based on gradient variance (default: 1.0).
+            Which permutation strategy to use ('global' or 'none') (default: 'global').
         deterministic_seed (Optional[int], optional):
             Seed for deterministic behavior in CUDA kernels (default: None).
     """
@@ -122,9 +115,6 @@ class SPARKLES(Optimizer):
         stochastic_rounding_magnitude: Optional[float] = None,
         use_bit_manipulation: bool = True,
         permutation_strategy: str = "global",
-        magnitude_bands: int = 5,
-        local_neighborhood_size: float = 0.1,
-        adaptive_scale_factor: float = 1.0,
         deterministic_seed: Optional[int] = None,
     ):
         defaults = dict(
@@ -145,9 +135,6 @@ class SPARKLES(Optimizer):
             stochastic_rounding_magnitude=stochastic_rounding_magnitude,
             use_bit_manipulation=use_bit_manipulation,
             permutation_strategy=permutation_strategy,
-            magnitude_bands=magnitude_bands,
-            local_neighborhood_size=local_neighborhood_size,
-            adaptive_scale_factor=adaptive_scale_factor,
             deterministic_seed=deterministic_seed,
         )
         super(SPARKLES, self).__init__(params, defaults)
@@ -202,178 +189,26 @@ class SPARKLES(Optimizer):
             perm_idx = torch.randperm(x.numel(), device=x.device)
             x.copy_(x[perm_idx])
 
-    def apply_magnitude_aware_permutation(
-        self, x: torch.Tensor, bands: int = 5
-    ) -> None:
-        """Apply magnitude-aware permutation - only shuffle elements within similar magnitude bands.
-
-        :param x: torch.Tensor. Tensor to permute.
-        :param bands: int. Number of magnitude bands to create.
-        """
-        if x.numel() <= 1:
-            return
-
-        # Flatten tensor for easier handling
-        original_shape = x.shape
-        flat_x = x.view(-1)
-        abs_x = torch.abs(flat_x)
-
-        # Get min and max values for magnitude bands
-        min_val = abs_x.min().item()
-        max_val = abs_x.max().item()
-
-        # Add small epsilon to prevent division by zero
-        if min_val == max_val:
-            min_val = min_val - 1e-8
-            max_val = max_val + 1e-8
-
-        # Create logarithmic magnitude bands
-        if min_val <= 0:
-            min_val = 1e-8
-
-        log_min = torch.log10(torch.tensor(min_val))
-        log_max = torch.log10(torch.tensor(max_val))
-        band_width = (log_max - log_min) / bands
-
-        # Create bands and permute within each band
-        for i in range(bands):
-            lower_bound = torch.pow(10, log_min + i * band_width)
-            upper_bound = torch.pow(10, log_min + (i + 1) * band_width)
-
-            # Find elements in this magnitude band
-            if i == bands - 1:  # Include max value in the last band
-                mask = (abs_x >= lower_bound) & (abs_x <= upper_bound)
-            else:
-                mask = (abs_x >= lower_bound) & (abs_x < upper_bound)
-
-            # Skip if no elements in this band
-            if not torch.any(mask):
-                continue
-
-            # Get indices and values in this band
-            indices = torch.nonzero(mask).view(-1)
-            if indices.numel() <= 1:
-                continue
-
-            # Permute elements within the band
-            perm_indices = indices[torch.randperm(indices.numel(), device=x.device)]
-            flat_x[indices] = flat_x[perm_indices]
-
-        # Reshape back to original shape
-        x.copy_(flat_x.view(original_shape))
-
-    def apply_local_neighborhood_permutation(
-        self, x: torch.Tensor, neighborhood_size: float = 0.1
-    ) -> None:
-        """Apply local neighborhood permutation - shuffle elements only within a local region.
-
-        :param x: torch.Tensor. Tensor to permute.
-        :param neighborhood_size: float. Size of local neighborhood as fraction of tensor size.
-        """
-        if x.numel() <= 1:
-            return
-
-        # Flatten tensor for easier handling
-        original_shape = x.shape
-        flat_x = x.view(-1)
-        n = flat_x.numel()
-
-        # Calculate actual neighborhood size
-        k = max(2, int(n * neighborhood_size))
-
-        # Create a permuted version by sliding a window
-        result = flat_x.clone()
-
-        # Process in chunks to allow for local permutations
-        for i in range(0, n, k):
-            # Get local chunk (handle edge case at the end)
-            end_idx = min(i + k, n)
-            chunk = flat_x[i:end_idx]
-
-            # Only permute if we have multiple elements
-            if chunk.numel() > 1:
-                perm_idx = torch.randperm(chunk.numel(), device=x.device)
-                result[i:end_idx] = chunk[perm_idx]
-
-        # Reshape back to original shape
-        x.copy_(result.view(original_shape))
-
-    def apply_adaptive_permutation(
-        self, x: torch.Tensor, scale_factor: float = 1.0
-    ) -> None:
-        """Apply adaptive permutation strength based on tensor variance.
-
-        :param x: torch.Tensor. Tensor to permute.
-        :param scale_factor: float. Scaling factor for permutation strength.
-        """
-        if x.numel() <= 1:
-            return
-
-        # Flatten tensor for easier handling
-        original_shape = x.shape
-        flat_x = x.view(-1)
-        n = flat_x.numel()
-
-        # Compute variance to determine permutation strength
-        var = torch.var(flat_x).item()
-
-        # Normalize variance to a reasonable range [0, 1]
-        # Using sigmoid-like normalization
-        norm_var = 1.0 / (1.0 + torch.exp(-scale_factor * var))
-
-        # Determine how much of the tensor to permute based on variance
-        # High variance -> less permutation, Low variance -> more permutation
-        permutation_ratio = 1.0 - norm_var
-        k = max(2, int(n * permutation_ratio))
-
-        # No need to permute if permutation ratio is tiny
-        if k <= 1:
-            return
-
-        # Select k random elements to permute
-        indices = torch.randperm(n, device=x.device)[:k]
-        values = flat_x[indices]
-
-        # Permute just these k elements
-        perm_indices = torch.randperm(k, device=x.device)
-        flat_x[indices] = values[perm_indices]
-
-        # Reshape back to original shape
-        x.copy_(flat_x.view(original_shape))
-
     def apply_stochastic_operator(
         self,
         x: torch.Tensor,
         strategy: str = "global",
-        magnitude_bands: int = 5,
-        local_neighborhood_size: float = 0.1,
-        adaptive_scale_factor: float = 1.0,
     ) -> None:
         r"""Apply stochastic operator R to tensor x.
-        This implementation provides multiple permutation strategies.
+        Only 'global' and 'none' strategies are supported.
 
-        :param x: torch.Tensor. Tensor to apply stochastic operator to.
-        :param strategy: str. One of 'global', 'magnitude', 'local', 'adaptive', 'none'
-        :param magnitude_bands: int. Number of magnitude bands for magnitude-aware shuffling.
-        :param local_neighborhood_size: float. Size of local neighborhood as fraction of tensor size.
-        :param adaptive_scale_factor: float. Scaling factor for adaptive permutation.
+        Args:
+            x (torch.Tensor): Tensor to apply stochastic operator to.
+            strategy (str): Either 'global' (randomly permute all elements) or 'none' (no permutation).
         """
         if strategy == "global":
             self.apply_global_permutation(x)
-        elif strategy == "magnitude":
-            self.apply_magnitude_aware_permutation(x, bands=magnitude_bands)
-        elif strategy == "local":
-            self.apply_local_neighborhood_permutation(
-                x, neighborhood_size=local_neighborhood_size
-            )
-        elif strategy == "adaptive":
-            self.apply_adaptive_permutation(x, scale_factor=adaptive_scale_factor)
         elif strategy == "none":
             pass
         else:
             raise ValueError(
                 f"Unknown permutation strategy: {strategy}. "
-                f"Must be one of 'global', 'magnitude', 'local', 'adaptive', 'none'."
+                f"Must be one of 'global', 'none'."
             )
 
     def apply_stochastic_bf16_rounding(
@@ -463,9 +298,6 @@ class SPARKLES(Optimizer):
             stochastic_rounding_magnitude = group["stochastic_rounding_magnitude"]
             use_bit_manipulation = group["use_bit_manipulation"]
             permutation_strategy = group["permutation_strategy"]
-            magnitude_bands = group["magnitude_bands"]
-            local_neighborhood_size = group["local_neighborhood_size"]
-            adaptive_scale_factor = group["adaptive_scale_factor"]
             deterministic_seed = group["deterministic_seed"]
 
             for p in group["params"]:
@@ -561,9 +393,6 @@ class SPARKLES(Optimizer):
                         self.apply_stochastic_operator(
                             update,
                             strategy=permutation_strategy,
-                            magnitude_bands=magnitude_bands,
-                            local_neighborhood_size=local_neighborhood_size,
-                            adaptive_scale_factor=adaptive_scale_factor,
                         )
                         state["stochastic_applied"] = True
                     else:
