@@ -1,29 +1,15 @@
 #include <torch/extension.h>
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <cuda_runtime_api.h>
+#include <chrono>
 
-// Kernel declaration
-void copy_stochastic_cuda_kernel(
-    float* target, const float* source, int64_t numel, uint64_t seed);
-
+// Declare the launcher from the .cu file
 void copy_stochastic_cuda_launcher(
-    at::Tensor& target, const at::Tensor& source, uint64_t seed)
-{
-    const int threads = 256;
-    const int64_t numel = source.numel();
-    const int blocks = (numel + threads - 1) / threads;
-
-    // Only support float32
-    copy_stochastic_cuda_kernel<<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
-        target.data_ptr<float>(),
-        source.data_ptr<float>(),
-        numel,
-        seed
-    );
-}
+    float* target, const float* source, int64_t numel, uint64_t seed, cudaStream_t stream);
 
 void copy_stochastic_cuda(
-    at::Tensor& target, const at::Tensor& source)
+    at::Tensor target, at::Tensor source)
 {
     TORCH_CHECK(target.is_cuda(), "target must be a CUDA tensor");
     TORCH_CHECK(source.is_cuda(), "source must be a CUDA tensor");
@@ -31,8 +17,16 @@ void copy_stochastic_cuda(
     TORCH_CHECK(target.scalar_type() == at::kFloat, "target must be float32");
     TORCH_CHECK(source.scalar_type() == at::kFloat, "source must be float32");
 
-    uint64_t seed = at::cuda::getDefaultCUDAGenerator().current_seed();
-    copy_stochastic_cuda_launcher(target, source, seed);
+    // Use a simple time-based seed
+    uint64_t seed = std::chrono::system_clock::now().time_since_epoch().count();
+
+    copy_stochastic_cuda_launcher(
+        target.data_ptr<float>(),
+        source.data_ptr<float>(),
+        target.numel(),
+        seed,
+        at::cuda::getCurrentCUDAStream()
+    );
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

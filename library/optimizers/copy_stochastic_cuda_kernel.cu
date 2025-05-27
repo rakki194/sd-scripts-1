@@ -1,5 +1,6 @@
 #include <cuda.h>
 #include <curand_kernel.h>
+#include <ATen/cuda/CUDAContext.h>
 
 __global__ void copy_stochastic_cuda_kernel(
     float* target, const float* source, int64_t numel, uint64_t seed)
@@ -27,4 +28,15 @@ __global__ void copy_stochastic_cuda_kernel(
     float out = *reinterpret_cast<float*>(&result);
 
     target[idx] = out;
+}
+
+// C++-style launcher
+void copy_stochastic_cuda_launcher(
+    float* target, const float* source, int64_t numel, uint64_t seed, cudaStream_t stream)
+{
+    int threads = 256;
+    int blocks = (numel + threads - 1) / threads;
+    copy_stochastic_cuda_kernel<<<blocks, threads, 0, stream>>>(
+        target, source, numel, seed
+    );
 } 

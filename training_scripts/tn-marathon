@@ -4,7 +4,7 @@ set -e -o pipefail
 # Ensure deterministic CuBLAS for PyTorch
 #export CUBLAS_WORKSPACE_CONFIG=:4096:8
 
-NAME=noob-sparkles-marathon_full-v3s1500                    # Name of the model to be trained (continued version)
+NAME=noob-sparkles-marathon_full-v4s1500                    # Name of the model to be trained (continued version)
 # Optional variables
 TRAINING_DIR="/home/kade/datasets/marathon"                     # Directory containing dataset
 # STEPS=                                                  # Total training steps
@@ -67,7 +67,7 @@ args=(
                "train_norm=False"             # Don't train norm layers
     --network_dropout=0                       # Dropout for the network (0 = no dropout)
     # Optimizer config
-    --optimizer_type="SNIFFED"                 # Use SPARKLES optimizer
+    --optimizer_type="SPARKLES"                 # Use SPARKLES optimizer
     --train_batch_size=14                     # Batch size for training
     --max_grad_norm=1                         # Maximum gradient norm for gradient clipping
     --gradient_checkpointing                  # Use gradient checkpointing to save memory
