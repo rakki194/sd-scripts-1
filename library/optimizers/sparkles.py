@@ -349,7 +349,7 @@ class SPARKLES(Optimizer):
         This implementation provides multiple permutation strategies.
 
         :param x: torch.Tensor. Tensor to apply stochastic operator to.
-        :param strategy: str. One of 'global', 'magnitude', 'local', 'adaptive'
+        :param strategy: str. One of 'global', 'magnitude', 'local', 'adaptive', 'none'
         :param magnitude_bands: int. Number of magnitude bands for magnitude-aware shuffling.
         :param local_neighborhood_size: float. Size of local neighborhood as fraction of tensor size.
         :param adaptive_scale_factor: float. Scaling factor for adaptive permutation.
@@ -364,10 +364,12 @@ class SPARKLES(Optimizer):
             )
         elif strategy == "adaptive":
             self.apply_adaptive_permutation(x, scale_factor=adaptive_scale_factor)
+        elif strategy == "none":
+            pass
         else:
             raise ValueError(
                 f"Unknown permutation strategy: {strategy}. "
-                f"Must be one of 'global', 'magnitude', 'local', 'adaptive'."
+                f"Must be one of 'global', 'magnitude', 'local', 'adaptive', 'none'."
             )
 
     def apply_stochastic_bf16_rounding(
