@@ -24,4 +24,4 @@ def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
         raise ValueError("Both tensors must be CUDA tensors")
     if target.dtype != torch.float32 or source.dtype != torch.float32:
         raise ValueError("Both tensors must be float32")
-    copy_stochastic_cuda_wrapper.copy_stochastic_cuda_wrapper(target, source) 
+    copy_stochastic_cuda_wrapper.copy_stochastic_cuda(target, source) 
