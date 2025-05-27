@@ -5054,16 +5054,6 @@ def get_optimizer(args, trainable_params):
             raise ImportError("Importing SPARKLES failed")
         optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
-    elif optimizer_type == "SNIFFED".lower():
-        logger.info(f"use SNIFFED optimizer | {optimizer_kwargs}")
-        try:
-            from library.optimizers.sniffed import SNIFFED
-
-            optimizer_class = SNIFFED
-        except ImportError:
-            raise ImportError("Importing SNIFFED failed")
-        optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
-
     elif optimizer_type == "SPARKFREE".lower():
         logger.info(f"use SPARKFREE optimizer | {optimizer_kwargs}")
         try:
