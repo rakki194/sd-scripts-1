@@ -2,8 +2,6 @@
 set -e -o pipefail
 
 NAME=noob-sparkles-sun-v1s300                    # Name of the model to be trained (continued version)
-#NAME=noob-sparkfree-sunspace-v2s300                    # Name of the model to be trained (continued version)
-#NAME=noob-sparkfree_adopt-sunspace-v2s300                    # Name of the model to be trained (continued version)
 # Optional variables
 TRAINING_DIR="/home/kade/datasets/sunspace"                     # Directory containing dataset
 # STEPS=                                                  # Total training steps

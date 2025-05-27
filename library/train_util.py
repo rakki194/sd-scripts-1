@@ -5049,26 +5049,6 @@ def get_optimizer(args, trainable_params):
             raise ImportError("Importing SPARKLES failed")
         optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
-    elif optimizer_type == "SPARKFREE".lower():
-        logger.info(f"use SPARKFREE optimizer | {optimizer_kwargs}")
-        try:
-            from library.optimizers.sparkfree import SPARKFREE
-
-            optimizer_class = SPARKFREE
-        except ImportError:
-            raise ImportError("Importing SPARKFREE failed")
-        optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
-
-    elif optimizer_type == "SPARKFREE_ADOPT".lower():
-        logger.info(f"use SPARKFREE_ADOPT optimizer | {optimizer_kwargs}")
-        try:
-            from library.optimizers.sparkfree_adopt import SPARKFREE_ADOPT
-
-            optimizer_class = SPARKFREE_ADOPT
-        except ImportError:
-            raise ImportError("Importing SPARKFREE_ADOPT failed")
-        optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
-
     if optimizer is None:
         # 任意のoptimizerを使う
         optimizer_type = args.optimizer_type  # lowerでないやつ（微妙）

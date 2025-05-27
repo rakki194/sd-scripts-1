@@ -337,34 +337,15 @@ class NetworkTrainer:
         # 学習に必要なクラスを準備する
         accelerator.print("prepare optimizer, data loader etc.")
 
-        # 後方互換性を確保するよ
-        try:
-            results = network.prepare_optimizer_params(args.text_encoder_lr, args.unet_lr, args.learning_rate)
-            if type(results) is tuple:
-                trainable_params = results[0]
-                lr_descriptions = results[1]
-            else:
-                trainable_params = results
-                lr_descriptions = None
-        except TypeError as e:
-            # logger.warning(f"{e}")
-            # accelerator.print(
-            #     "Deprecated: use prepare_optimizer_params(text_encoder_lr, unet_lr, learning_rate) instead of prepare_optimizer_params(text_encoder_lr, unet_lr)"
-            # )
-            trainable_params = network.prepare_optimizer_params(args.text_encoder_lr, args.unet_lr)
-            lr_descriptions = None
-
-        # if len(trainable_params) == 0:
-        #     accelerator.print("no trainable parameters found / 学習可能なパラメータが見つかりませんでした")
-        # for params in trainable_params:
-        #     for k, v in params.items():
-        #         if type(v) == float:
-        #             pass
-        #         else:
-        #             v = len(v)
-        #         accelerator.print(f"trainable_params: {k} = {v}")
-
+        # Move network to bfloat16/CUDA before creating optimizer to enable fused CUDA kernel in SPARKLES
+        if hasattr(args, 'full_bf16') and args.full_bf16:
+            network.to(torch.bfloat16)
+        elif hasattr(args, 'full_fp16') and args.full_fp16:
+            network.to(torch.float16)
+        # Ensure trainable_params is taken after moving network
+        trainable_params = network.parameters()  # or .prepare_optimizer_params(...)
         optimizer_name, optimizer_args, optimizer = train_util.get_optimizer(args, trainable_params)
+        lr_descriptions = None  # Fix NameError if not using custom LR group descriptions
 
         # dataloaderを準備する
         # DataLoaderのプロセス数：0 は persistent_workers が使えないので注意
@@ -1025,6 +1006,11 @@ class NetworkTrainer:
                         if args.max_grad_norm != 0.0:
                             params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
                             accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+
+                    # Force gradients to float32 for fused CUDA kernel compatibility
+                    for param in network.parameters():
+                        if param.grad is not None and param.grad.dtype != torch.float32:
+                            param.grad.data = param.grad.data.to(torch.float32)
 
                     optimizer.step()
                     lr_scheduler.step()
