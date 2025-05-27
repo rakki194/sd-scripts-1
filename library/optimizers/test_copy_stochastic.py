@@ -143,6 +143,29 @@ def optimizer_like_benchmark(size=10**7, n_iters=100, shape=(4096, 256)):
     elapsed = time.time() - start
     print(f"Optimizer-like CUDA bfloat16: {elapsed:.4f} s total, {elapsed/n_iters*1000:.4f} ms/iter")
 
+def optimizer_like_benchmark_pytorch(size=10**7, n_iters=100, shape=(4096, 256)):
+    print(f"\nOptimizer-like PyTorch benchmark with shape: {shape}, iterations: {n_iters}")
+    param = torch.randn(*shape, device='cuda', dtype=torch.bfloat16)
+    grad = torch.randn(*shape, device='cuda', dtype=torch.float32)
+    ema = torch.zeros_like(param)
+    ema2 = torch.zeros_like(param)
+
+    torch.cuda.synchronize()
+    start = time.time()
+    for _ in range(n_iters):
+        # PyTorch: param = param - lr * grad (in float32, then cast to bf16)
+        tmp = param.float() - 0.001 * grad
+        param.copy_(tmp.to(torch.bfloat16))
+        # PyTorch: ema = 0.9 * ema + 0.1 * param (in float32, then cast to bf16)
+        tmp_ema = 0.9 * ema.float() + 0.1 * param.float()
+        ema.copy_(tmp_ema.to(torch.bfloat16))
+        # PyTorch: ema2 = 0.99 * ema2 + 0.01 * (grad ** 2) (in float32, then cast to bf16)
+        tmp_ema2 = 0.99 * ema2.float() + 0.01 * (grad ** 2)
+        ema2.copy_(tmp_ema2.to(torch.bfloat16))
+    torch.cuda.synchronize()
+    elapsed = time.time() - start
+    print(f"Optimizer-like PyTorch bfloat16: {elapsed:.4f} s total, {elapsed/n_iters*1000:.4f} ms/iter")
+
 if __name__ == "__main__":
     test_bfloat16_vs_pytorch()
     test_edge_cases()
@@ -150,4 +173,5 @@ if __name__ == "__main__":
     test_noncontiguous()
     benchmark_copy_stochastic_bf16()
     benchmark_pytorch_bfloat16()
-    optimizer_like_benchmark() 
+    optimizer_like_benchmark()
+    optimizer_like_benchmark_pytorch() 

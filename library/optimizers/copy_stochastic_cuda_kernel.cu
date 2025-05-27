@@ -72,4 +72,60 @@ void copy_stochastic_bf16_cuda_launcher(
     copy_stochastic_bf16_cuda_kernel<<<blocks, threads, 0, stream>>>(
         target, source, numel, seed
     );
+}
+
+__global__ void fused_optimizer_kernel(
+    __nv_bfloat16* __restrict__ param,
+    __nv_bfloat16* __restrict__ ema,
+    __nv_bfloat16* __restrict__ ema2,
+    const float* __restrict__ grad,
+    int64_t numel,
+    float lr,
+    float ema_beta,
+    float ema2_beta,
+    uint64_t seed)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < numel) {
+        // param update
+        float p = __bfloat162float(param[idx]);
+        float g = __ldg(&grad[idx]);
+        float new_p = p - lr * g;
+        int32_t src_bits = __float_as_int(new_p);
+        uint32_t rand_state = static_cast<uint32_t>(seed) ^ static_cast<uint32_t>(idx);
+        uint32_t rand16 = xorshift32(rand_state) & 0xFFFF;
+        int32_t result = src_bits + rand16;
+        result &= 0xFFFF0000;
+        float rounded_p = __int_as_float(result);
+        param[idx] = __float2bfloat16(rounded_p);
+
+        // ema update
+        float e = __bfloat162float(ema[idx]);
+        float new_e = ema_beta * e + (1.0f - ema_beta) * rounded_p;
+        ema[idx] = __float2bfloat16(new_e);
+
+        // ema2 update
+        float e2 = __bfloat162float(ema2[idx]);
+        float new_e2 = ema2_beta * e2 + (1.0f - ema2_beta) * (g * g);
+        ema2[idx] = __float2bfloat16(new_e2);
+    }
+}
+
+void fused_optimizer_kernel_launcher(
+    __nv_bfloat16* param,
+    __nv_bfloat16* ema,
+    __nv_bfloat16* ema2,
+    const float* grad,
+    int64_t numel,
+    float lr,
+    float ema_beta,
+    float ema2_beta,
+    uint64_t seed,
+    cudaStream_t stream)
+{
+    int threads = 512;
+    int blocks = (numel + threads - 1) / threads;
+    fused_optimizer_kernel<<<blocks, threads, 0, stream>>>(
+        param, ema, ema2, grad, numel, lr, ema_beta, ema2_beta, seed
+    );
 } 

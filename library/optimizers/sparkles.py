@@ -31,9 +31,9 @@ def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
         target.copy_(result.view(dtype=torch.float32))
 
 try:
-    from .copy_stochastic_cuda_wrapper import copy_stochastic_bf16_ as cuda_copy_stochastic_bf16_
+    from .copy_stochastic_cuda_wrapper import copy_stochastic_bf16_ as cuda_copy_stochastic_bf16_, fused_optimizer as cuda_fused_optimizer
 except ImportError:
-    from copy_stochastic_cuda_wrapper import copy_stochastic_bf16_ as cuda_copy_stochastic_bf16_
+    from copy_stochastic_cuda_wrapper import copy_stochastic_bf16_ as cuda_copy_stochastic_bf16_, fused_optimizer as cuda_fused_optimizer
 
 # Save the original Python version
 py_copy_stochastic_ = copy_stochastic_
@@ -610,7 +610,30 @@ class SPARKLES(Optimizer):
                     update.clamp_(-clip, clip)
 
                 # Update parameters with stochastic BF16 rounding
-                p_fp32.sub_(update)
+                if (
+                    p.dtype == torch.bfloat16 and p.is_cuda and
+                    ema.dtype == torch.bfloat16 and ema.is_cuda and
+                    ema_squared.dtype == torch.bfloat16 and ema_squared.is_cuda and
+                    grad.dtype == torch.float32 and grad.is_cuda
+                ):
+                    # Use fused CUDA kernel for param, ema, ema2
+                    cuda_fused_optimizer(p.data, ema, ema_squared, grad, lr, beta1, beta2)
+                    # Update prev_grad as before
+                    if prev_grad.dtype == torch.bfloat16 and prev_grad.is_cuda:
+                        if use_stochastic_rounding and use_bit_manipulation:
+                            copy_stochastic_dispatch(prev_grad, grad_fp32)
+                        else:
+                            prev_grad.copy_(self.apply_stochastic_bf16_rounding(
+                                grad_fp32,
+                                probability=stochastic_rounding_prob,
+                                magnitude=stochastic_rounding_magnitude,
+                                use_bit_manipulation=False,
+                            ))
+                    else:
+                        prev_grad.copy_(grad_fp32)
+                    continue  # skip rest, already updated param, ema, ema2
+                else:
+                    p_fp32.sub_(update)
 
                 # Apply stochastic BF16 rounding if enabled
                 if p.dtype == torch.bfloat16:
