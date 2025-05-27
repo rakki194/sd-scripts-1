@@ -98,6 +98,8 @@ class SPARKLES(Optimizer):
             Size of local neighborhood as fraction of tensor size (default: 0.1).
         adaptive_scale_factor (float, optional):
             Scaling factor for adaptive permutation based on gradient variance (default: 1.0).
+        deterministic_seed (Optional[int], optional):
+            Seed for deterministic behavior in CUDA kernels (default: None).
     """
 
     def __init__(
@@ -123,6 +125,7 @@ class SPARKLES(Optimizer):
         magnitude_bands: int = 5,
         local_neighborhood_size: float = 0.1,
         adaptive_scale_factor: float = 1.0,
+        deterministic_seed: Optional[int] = None,
     ):
         defaults = dict(
             lr=lr,
@@ -145,6 +148,7 @@ class SPARKLES(Optimizer):
             magnitude_bands=magnitude_bands,
             local_neighborhood_size=local_neighborhood_size,
             adaptive_scale_factor=adaptive_scale_factor,
+            deterministic_seed=deterministic_seed,
         )
         super(SPARKLES, self).__init__(params, defaults)
 
@@ -462,6 +466,7 @@ class SPARKLES(Optimizer):
             magnitude_bands = group["magnitude_bands"]
             local_neighborhood_size = group["local_neighborhood_size"]
             adaptive_scale_factor = group["adaptive_scale_factor"]
+            deterministic_seed = group["deterministic_seed"]
 
             for p in group["params"]:
                 if p.grad is None:
@@ -570,6 +575,12 @@ class SPARKLES(Optimizer):
                     update.clamp_(-clip, clip)
 
                 # Update parameters with stochastic BF16 rounding
+                seed = deterministic_seed
+                if seed is not None:
+                    # Make the seed unique per parameter and step for full determinism
+                    param_seed = int(seed) + state["step"] + hash(p) % 100000
+                else:
+                    param_seed = None
                 if (
                     p.dtype == torch.bfloat16 and p.is_cuda and
                     ema.dtype == torch.bfloat16 and ema.is_cuda and
@@ -577,11 +588,17 @@ class SPARKLES(Optimizer):
                     grad.dtype == torch.float32 and grad.is_cuda
                 ):
                     # Use fused CUDA kernel for param, ema, ema2
-                    cuda_fused_optimizer(p.data, ema, ema_squared, grad, lr, beta1, beta2)
+                    if param_seed is not None:
+                        cuda_fused_optimizer(p.data, ema, ema_squared, grad, lr, beta1, beta2, param_seed)
+                    else:
+                        cuda_fused_optimizer(p.data, ema, ema_squared, grad, lr, beta1, beta2)
                     # Update prev_grad as before
                     if prev_grad.dtype == torch.bfloat16 and prev_grad.is_cuda:
                         if use_stochastic_rounding and use_bit_manipulation:
-                            cuda_copy_stochastic_bf16_(prev_grad, grad_fp32)
+                            if param_seed is not None:
+                                cuda_copy_stochastic_bf16_(prev_grad, grad_fp32, param_seed)
+                            else:
+                                cuda_copy_stochastic_bf16_(prev_grad, grad_fp32)
                         else:
                             prev_grad.copy_(self.apply_stochastic_bf16_rounding(
                                 grad_fp32,
@@ -598,10 +615,13 @@ class SPARKLES(Optimizer):
                 # Apply stochastic BF16 rounding if enabled
                 if p.dtype == torch.bfloat16:
                     if use_stochastic_rounding:
-                        (
-                            cuda_copy_stochastic_bf16_(p.data, p_fp32)
-                            if use_bit_manipulation
-                            else p.data.copy_(
+                        if use_bit_manipulation:
+                            if param_seed is not None:
+                                cuda_copy_stochastic_bf16_(p.data, p_fp32, param_seed)
+                            else:
+                                cuda_copy_stochastic_bf16_(p.data, p_fp32)
+                        else:
+                            p.data.copy_(
                                 self.apply_stochastic_bf16_rounding(
                                     p_fp32,
                                     probability=stochastic_rounding_prob,
@@ -609,7 +629,6 @@ class SPARKLES(Optimizer):
                                     use_bit_manipulation=False,
                                 )
                             )
-                        )
                     else:
                         # Standard conversion to BF16
                         p.data.copy_(p_fp32.to(torch.bfloat16))
@@ -620,10 +639,13 @@ class SPARKLES(Optimizer):
                 # Store current gradient for next iteration (with stochastic rounding if BF16)
                 if prev_grad.dtype == torch.bfloat16:
                     if use_stochastic_rounding:
-                        (
-                            cuda_copy_stochastic_bf16_(prev_grad, grad_fp32)
-                            if use_bit_manipulation
-                            else prev_grad.copy_(
+                        if use_bit_manipulation:
+                            if param_seed is not None:
+                                cuda_copy_stochastic_bf16_(prev_grad, grad_fp32, param_seed)
+                            else:
+                                cuda_copy_stochastic_bf16_(prev_grad, grad_fp32)
+                        else:
+                            prev_grad.copy_(
                                 self.apply_stochastic_bf16_rounding(
                                     grad_fp32,
                                     probability=stochastic_rounding_prob,
@@ -631,7 +653,6 @@ class SPARKLES(Optimizer):
                                     use_bit_manipulation=False,
                                 )
                             )
-                        )
                     else:
                         prev_grad.copy_(grad_fp32.to(torch.bfloat16))
                 else:
@@ -640,10 +661,13 @@ class SPARKLES(Optimizer):
                 # Update state tensors with stochastic rounding if BF16
                 if ema.dtype == torch.bfloat16:
                     if use_stochastic_rounding:
-                        (
-                            cuda_copy_stochastic_bf16_(ema, ema_fp32)
-                            if use_bit_manipulation
-                            else ema.copy_(
+                        if use_bit_manipulation:
+                            if param_seed is not None:
+                                cuda_copy_stochastic_bf16_(ema, ema_fp32, param_seed)
+                            else:
+                                cuda_copy_stochastic_bf16_(ema, ema_fp32)
+                        else:
+                            ema.copy_(
                                 self.apply_stochastic_bf16_rounding(
                                     ema_fp32,
                                     probability=stochastic_rounding_prob,
@@ -651,7 +675,6 @@ class SPARKLES(Optimizer):
                                     use_bit_manipulation=False,
                                 )
                             )
-                        )
                     else:
                         ema.copy_(ema_fp32.to(torch.bfloat16))
                 else:
@@ -659,10 +682,13 @@ class SPARKLES(Optimizer):
 
                 if ema_squared.dtype == torch.bfloat16:
                     if use_stochastic_rounding:
-                        (
-                            cuda_copy_stochastic_bf16_(ema_squared, ema_squared_fp32)
-                            if use_bit_manipulation
-                            else ema_squared.copy_(
+                        if use_bit_manipulation:
+                            if param_seed is not None:
+                                cuda_copy_stochastic_bf16_(ema_squared, ema_squared_fp32, param_seed)
+                            else:
+                                cuda_copy_stochastic_bf16_(ema_squared, ema_squared_fp32)
+                        else:
+                            ema_squared.copy_(
                                 self.apply_stochastic_bf16_rounding(
                                     ema_squared_fp32,
                                     probability=stochastic_rounding_prob,
@@ -670,7 +696,6 @@ class SPARKLES(Optimizer):
                                     use_bit_manipulation=False,
                                 )
                             )
-                        )
                     else:
                         ema_squared.copy_(ema_squared_fp32.to(torch.bfloat16))
                 else:

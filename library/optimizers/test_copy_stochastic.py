@@ -1,7 +1,7 @@
 import torch
 import time
-from copy_stochastic_cuda_wrapper import copy_stochastic_bf16_ as cuda_copy_stochastic_bf16_
-from sparkles import copy_stochastic_ as py_copy_stochastic_
+from library.optimizers.copy_stochastic_cuda_wrapper import copy_stochastic_bf16_ as cuda_copy_stochastic_bf16_
+from library.optimizers.sparkles import copy_stochastic_ as py_copy_stochastic_
 
 def check_no_unexpected_nan_inf(input_tensor, output_tensor, name):
     # Only allow NaN in output where input was NaN

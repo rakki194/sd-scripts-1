@@ -25,16 +25,13 @@ void fused_optimizer_kernel_launcher(
     cudaStream_t stream);
 
 void copy_stochastic_cuda(
-    at::Tensor target, at::Tensor source)
+    at::Tensor target, at::Tensor source, uint64_t seed)
 {
     TORCH_CHECK(target.is_cuda(), "target must be a CUDA tensor");
     TORCH_CHECK(source.is_cuda(), "source must be a CUDA tensor");
     TORCH_CHECK(target.numel() == source.numel(), "Tensors must have same number of elements");
     TORCH_CHECK(target.scalar_type() == at::kFloat, "target must be float32");
     TORCH_CHECK(source.scalar_type() == at::kFloat, "source must be float32");
-
-    // Use a simple time-based seed
-    uint64_t seed = std::chrono::system_clock::now().time_since_epoch().count();
 
     copy_stochastic_cuda_launcher(
         target.data_ptr<float>(),
@@ -47,15 +44,13 @@ void copy_stochastic_cuda(
 
 // New: bfloat16 binding
 void copy_stochastic_bf16_cuda(
-    at::Tensor target, at::Tensor source)
+    at::Tensor target, at::Tensor source, uint64_t seed)
 {
     TORCH_CHECK(target.is_cuda(), "target must be a CUDA tensor");
     TORCH_CHECK(source.is_cuda(), "source must be a CUDA tensor");
     TORCH_CHECK(target.numel() == source.numel(), "Tensors must have same number of elements");
     TORCH_CHECK(target.scalar_type() == at::kBFloat16, "target must be bfloat16");
     TORCH_CHECK(source.scalar_type() == at::kFloat, "source must be float32");
-
-    uint64_t seed = std::chrono::system_clock::now().time_since_epoch().count();
 
     copy_stochastic_bf16_cuda_launcher(
         reinterpret_cast<__nv_bfloat16*>(target.data_ptr<at::BFloat16>()),
@@ -98,8 +93,23 @@ void fused_optimizer(
     );
 }
 
+// Original overloads for backward compatibility
+void copy_stochastic_cuda(
+    at::Tensor target, at::Tensor source)
+{
+    uint64_t seed = std::chrono::system_clock::now().time_since_epoch().count();
+    copy_stochastic_cuda(target, source, seed);
+}
+
+void copy_stochastic_bf16_cuda(
+    at::Tensor target, at::Tensor source)
+{
+    uint64_t seed = std::chrono::system_clock::now().time_since_epoch().count();
+    copy_stochastic_bf16_cuda(target, source, seed);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("copy_stochastic_cuda", &copy_stochastic_cuda, "Stochastic copy (CUDA)");
-    m.def("copy_stochastic_bf16_cuda", &copy_stochastic_bf16_cuda, "Stochastic copy to bfloat16 (CUDA)");
+    m.def("copy_stochastic_cuda", (void (*)(at::Tensor, at::Tensor, uint64_t)) &copy_stochastic_cuda, "Stochastic copy (CUDA) with seed");
+    m.def("copy_stochastic_bf16_cuda", (void (*)(at::Tensor, at::Tensor, uint64_t)) &copy_stochastic_bf16_cuda, "Stochastic copy to bfloat16 (CUDA) with seed");
     m.def("fused_optimizer", &fused_optimizer, "Fused optimizer kernel (CUDA)");
 } 
