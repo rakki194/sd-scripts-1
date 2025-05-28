@@ -560,18 +560,18 @@ def train(args):
 
     # 学習する
     # total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
-    accelerator.print("running training / 学習開始")
-    accelerator.print(f"  num examples / サンプル数: {train_dataset_group.num_train_images}")
-    accelerator.print(f"  num batches per epoch / 1epochのバッチ数: {len(train_dataloader)}")
-    accelerator.print(f"  num epochs / epoch数: {num_train_epochs}")
+    accelerator.print("running training")
+    accelerator.print(f"  num examples: {train_dataset_group.num_train_images}")
+    accelerator.print(f"  num batches per epoch: {len(train_dataloader)}")
+    accelerator.print(f"  num epochs: {num_train_epochs}")
     accelerator.print(
-        f"  batch size per device / バッチサイズ: {', '.join([str(d.batch_size) for d in train_dataset_group.datasets])}"
+        f"  batch size per device: {', '.join([str(d.batch_size) for d in train_dataset_group.datasets])}"
     )
     # accelerator.print(
     #     f"  total train batch size (with parallel & distributed & accumulation) / 総バッチサイズ（並列学習、勾配合計含む）: {total_batch_size}"
     # )
-    accelerator.print(f"  gradient accumulation steps / 勾配を合計するステップ数 = {args.gradient_accumulation_steps}")
-    accelerator.print(f"  total optimization steps / 学習ステップ数: {args.max_train_steps}")
+    accelerator.print(f"  gradient accumulation steps: {args.gradient_accumulation_steps}")
+    accelerator.print(f"  total optimization steps: {args.max_train_steps}")
 
     progress_bar = tqdm(range(args.max_train_steps), smoothing=0, disable=not accelerator.is_local_main_process, desc="steps")
     global_step = 0

@@ -153,17 +153,17 @@ def train(args):
 
         fn_recursive_set_mem_eff(model)
 
-    # モデルに xformers とか memory efficient attention を組み込む
+    # Incorporate xformers and memory efficient attention into the model
     if args.diffusers_xformers:
         accelerator.print("Use xformers by Diffusers")
         set_diffusers_xformers_flag(unet, True)
     else:
-        # Windows版のxformersはfloatで学習できないのでxformersを使わない設定も可能にしておく必要がある
+        # Windows version of xformers cannot train with float, so we need to make it possible to disable xformers
         accelerator.print("Disable Diffusers' xformers")
         set_diffusers_xformers_flag(unet, False)
         train_util.replace_unet_modules(unet, args.mem_eff_attn, args.xformers, args.sdpa)
 
-    # 学習を準備する
+    # Prepare for training
     if cache_latents:
         vae.to(accelerator.device, dtype=vae_dtype)
         vae.requires_grad_(False)
@@ -175,7 +175,7 @@ def train(args):
 
         accelerator.wait_for_everyone()
 
-    # 学習を準備する：モデルを適切な状態にする
+    # Prepare for training: Set models to appropriate states
     training_models = []
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
@@ -188,7 +188,7 @@ def train(args):
         training_models.append(text_encoder)
     else:
         text_encoder.to(accelerator.device, dtype=weight_dtype)
-        text_encoder.requires_grad_(False)  # text encoderは学習しない
+        text_encoder.requires_grad_(False)  # text encoder is not trained
         if args.gradient_checkpointing:
             text_encoder.gradient_checkpointing_enable()
             text_encoder.train()  # required for gradient_checkpointing
@@ -213,12 +213,12 @@ def train(args):
             {"params": list(text_encoder.parameters()), "lr": args.learning_rate_te},
         ]
 
-    # 学習に必要なクラスを準備する
+    # Prepare classes needed for training
     accelerator.print("prepare optimizer, data loader etc.")
     _, _, optimizer = train_util.get_optimizer(args, trainable_params=trainable_params)
 
-    # dataloaderを準備する
-    # DataLoaderのプロセス数：0 は persistent_workers が使えないので注意
+    # Prepare dataloader
+    # Note: DataLoader process count of 0 cannot use persistent_workers
     n_workers = min(args.max_data_loader_n_workers, os.cpu_count())  # cpu_count or max_data_loader_n_workers
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset_group,
@@ -229,26 +229,26 @@ def train(args):
         persistent_workers=args.persistent_data_loader_workers,
     )
 
-    # 学習ステップ数を計算する
+    # Calculate number of training steps
     if args.max_train_epochs is not None:
         args.max_train_steps = args.max_train_epochs * math.ceil(
             len(train_dataloader) / accelerator.num_processes / args.gradient_accumulation_steps
         )
         accelerator.print(
-            f"override steps. steps for {args.max_train_epochs} epochs is / 指定エポックまでのステップ数: {args.max_train_steps}"
+            f"override steps. steps for {args.max_train_epochs} epochs is: {args.max_train_steps}"
         )
 
-    # データセット側にも学習ステップを送信
+    # Send training steps to dataset side
     train_dataset_group.set_max_train_steps(args.max_train_steps)
 
-    # lr schedulerを用意する
+    # Prepare learning rate scheduler
     lr_scheduler = train_util.get_scheduler_fix(args, optimizer, accelerator.num_processes)
 
-    # 実験的機能：勾配も含めたfp16学習を行う　モデル全体をfp16にする
+    # Experimental feature: Enable full fp16 training including gradients - convert entire model to fp16
     if args.full_fp16:
         assert (
             args.mixed_precision == "fp16"
-        ), "full_fp16 requires mixed precision='fp16' / full_fp16を使う場合はmixed_precision='fp16'を指定してください。"
+        ), "full_fp16 requires mixed precision='fp16'"
         accelerator.print("enable full fp16 training.")
         unet.to(weight_dtype)
         text_encoder.to(weight_dtype)
@@ -263,7 +263,7 @@ def train(args):
         )
         training_models = [ds_model]
     else:
-        # acceleratorがなんかよろしくやってくれるらしい
+        # accelerator handles model preparation appropriately
         if args.train_text_encoder:
             unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
                 unet, text_encoder, optimizer, train_dataloader, lr_scheduler
@@ -271,7 +271,7 @@ def train(args):
         else:
             unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(unet, optimizer, train_dataloader, lr_scheduler)
 
-    # 実験的機能：勾配も含めたfp16学習を行う　PyTorchにパッチを当ててfp16でのgrad scaleを有効にする
+    # Experimental feature: Enable full fp16 training including gradients - Apply patch to PyTorch to enable grad scale in fp16
     if args.full_fp16:
         train_util.patch_accelerator_for_fp16_training(accelerator)
 
@@ -284,18 +284,18 @@ def train(args):
     if (args.save_n_epoch_ratio is not None) and (args.save_n_epoch_ratio > 0):
         args.save_every_n_epochs = math.floor(num_train_epochs / args.save_n_epoch_ratio) or 1
 
-    # 学習する
+    # Start training
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
-    accelerator.print("running training / 学習開始")
-    accelerator.print(f"  num examples / サンプル数: {train_dataset_group.num_train_images}")
-    accelerator.print(f"  num batches per epoch / 1epochのバッチ数: {len(train_dataloader)}")
-    accelerator.print(f"  num epochs / epoch数: {num_train_epochs}")
-    accelerator.print(f"  batch size per device / バッチサイズ: {args.train_batch_size}")
+    accelerator.print("running training")
+    accelerator.print(f"  num examples: {train_dataset_group.num_train_images}")
+    accelerator.print(f"  num batches per epoch: {len(train_dataloader)}")
+    accelerator.print(f"  num epochs: {num_train_epochs}")
+    accelerator.print(f"  batch size per device: {args.train_batch_size}")
     accelerator.print(
-        f"  total train batch size (with parallel & distributed & accumulation) / 総バッチサイズ（並列学習、勾配合計含む）: {total_batch_size}"
+        f"  total train batch size (with parallel & distributed & accumulation): {total_batch_size}"
     )
-    accelerator.print(f"  gradient accumulation steps / 勾配を合計するステップ数 = {args.gradient_accumulation_steps}")
-    accelerator.print(f"  total optimization steps / 学習ステップ数: {args.max_train_steps}")
+    accelerator.print(f"  gradient accumulation steps: {args.gradient_accumulation_steps}")
+    accelerator.print(f"  total optimization steps: {args.max_train_steps}")
 
     progress_bar = tqdm(range(args.max_train_steps), smoothing=0, disable=not accelerator.is_local_main_process, desc="steps")
     global_step = 0
@@ -345,7 +345,7 @@ def train(args):
                             if "latents" in batch and batch["latents"] is not None:
                                 latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
                             else:
-                                # latentに変換
+                                # convert to latent
                                 latents = vae.encode(batch["images"].to(dtype=vae_dtype)).latent_dist.sample().to(weight_dtype)
                             latents = latents * 0.18215
                         b_size = latents.shape[0]
@@ -429,7 +429,7 @@ def train(args):
                             accelerator, args, None, global_step, accelerator.device, vae, tokenizer, text_encoder, unet
                         )
 
-                        # 指定ステップごとにモデルを保存
+                        # Save model at specified steps
                         if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
                             accelerator.wait_for_everyone()
                             if accelerator.is_main_process:
@@ -450,7 +450,7 @@ def train(args):
                                     vae,
                                 )
 
-                    current_loss = loss.detach().item()  # 平均なのでbatch sizeは関係ないはず
+                    current_loss = loss.detach().item()  # Average loss, so batch size doesn't matter
                     if args.logging_dir is not None:
                         logs = {"loss": current_loss}
                         train_util.append_lr_to_logs(logs, lr_scheduler, args.optimizer_type, including_unet=True)
@@ -593,7 +593,7 @@ def train(args):
                         accelerator, args, None, global_step, accelerator.device, vae, tokenizer, text_encoder, unet
                     )
 
-                    # 指定ステップごとにモデルを保存
+                    # Save model at specified steps
                     if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
                         accelerator.wait_for_everyone()
                         if accelerator.is_main_process:
@@ -614,7 +614,7 @@ def train(args):
                                 vae,
                             )
 
-                current_loss = loss.detach().item()  # 平均なのでbatch sizeは関係ないはず
+                current_loss = loss.detach().item()  # Average loss, so batch size doesn't matter
                 if args.logging_dir is not None:
                     logs = {"loss": current_loss}
                     train_util.append_lr_to_logs(logs, lr_scheduler, args.optimizer_type, including_unet=True)
@@ -665,7 +665,7 @@ def train(args):
     if is_main_process and (args.save_state or args.save_state_on_train_end):
         train_util.save_state_on_train_end(args, accelerator)
 
-    del accelerator  # この後メモリを使うのでこれは消す
+    del accelerator  # Delete this as we'll need memory for subsequent operations
 
     if is_main_process:
         src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
@@ -689,19 +689,19 @@ def setup_parser() -> argparse.ArgumentParser:
     custom_train_functions.add_custom_train_arguments(parser)
 
     parser.add_argument(
-        "--diffusers_xformers", action="store_true", help="use xformers by diffusers / Diffusersでxformersを使用する"
+        "--diffusers_xformers", action="store_true", help="use xformers by diffusers"
     )
-    parser.add_argument("--train_text_encoder", action="store_true", help="train text encoder / text encoderも学習する")
+    parser.add_argument("--train_text_encoder", action="store_true", help="train text encoder")
     parser.add_argument(
         "--learning_rate_te",
         type=float,
         default=None,
-        help="learning rate for text encoder, default is same as unet / Text Encoderの学習率、デフォルトはunetと同じ",
+        help="learning rate for text encoder, default is same as unet",
     )
     parser.add_argument(
         "--no_half_vae",
         action="store_true",
-        help="do not use fp16/bf16 VAE in mixed precision (use float VAE) / mixed precisionでも fp16/bf16 VAEを使わずfloat VAEを使う",
+        help="do not use fp16/bf16 VAE in mixed precision (use float VAE)",
     )
     parser.add_argument(
         "--optimizer_profiling",

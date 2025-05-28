@@ -1,11 +1,8 @@
 import argparse
-import json
 import math
 import os
 import random
-import time
 from multiprocessing import Value
-from types import SimpleNamespace
 import toml
 
 from tqdm import tqdm
@@ -14,13 +11,10 @@ import torch
 from library.device_utils import init_ipex, clean_memory_on_device
 init_ipex()
 
-from torch.nn.parallel import DistributedDataParallel as DDP
 from accelerate.utils import set_seed
-from diffusers import DDPMScheduler, ControlNetModel
 from safetensors.torch import load_file
-from library import deepspeed_utils, sai_model_spec, sdxl_model_util, sdxl_original_unet, sdxl_train_util
+from library import deepspeed_utils, sai_model_spec, sdxl_model_util, sdxl_train_util
 
-import library.model_util as model_util
 import library.train_util as train_util
 import library.config_util as config_util
 from library.config_util import (
@@ -33,8 +27,6 @@ from library.custom_train_functions import (
     add_v_prediction_like_loss,
     apply_snr_weight,
     prepare_scheduler_for_custom_training,
-    pyramid_noise_like,
-    apply_noise_offset,
     scale_v_prediction_loss_like_noise_prediction,
     apply_debiased_estimation,
 )
@@ -298,17 +290,17 @@ def train(args):
 
     # 学習する
     # TODO: find a way to handle total batch size when there are multiple datasets
-    accelerator.print("running training / 学習開始")
-    accelerator.print(f"  num train images * repeats / 学習画像の数×繰り返し回数: {train_dataset_group.num_train_images}")
-    accelerator.print(f"  num reg images / 正則化画像の数: {train_dataset_group.num_reg_images}")
-    accelerator.print(f"  num batches per epoch / 1epochのバッチ数: {len(train_dataloader)}")
-    accelerator.print(f"  num epochs / epoch数: {num_train_epochs}")
+    accelerator.print("running training")
+    accelerator.print(f"  num train images * repeats: {train_dataset_group.num_train_images}")
+    accelerator.print(f"  num reg images: {train_dataset_group.num_reg_images}")
+    accelerator.print(f"  num batches per epoch: {len(train_dataloader)}")
+    accelerator.print(f"  num epochs: {num_train_epochs}")
     accelerator.print(
-        f"  batch size per device / バッチサイズ: {', '.join([str(d.batch_size) for d in train_dataset_group.datasets])}"
+        f"  batch size per device: {', '.join([str(d.batch_size) for d in train_dataset_group.datasets])}"
     )
     # logger.info(f"  total train batch size (with parallel & distributed & accumulation) / 総バッチサイズ（並列学習、勾配合計含む）: {total_batch_size}")
-    accelerator.print(f"  gradient accumulation steps / 勾配を合計するステップ数 = {args.gradient_accumulation_steps}")
-    accelerator.print(f"  total optimization steps / 学習ステップ数: {args.max_train_steps}")
+    accelerator.print(f"  gradient accumulation steps: {args.gradient_accumulation_steps}")
+    accelerator.print(f"  total optimization steps: {args.max_train_steps}")
 
     progress_bar = tqdm(range(args.max_train_steps), smoothing=0, disable=not accelerator.is_local_main_process, desc="steps")
     global_step = 0
@@ -358,7 +350,6 @@ def train(args):
     )
     if profiler_ctx:
         with profiler_ctx as prof:
-            # main training loop
             for epoch in range(num_train_epochs):
                 accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
                 current_epoch.value = epoch + 1
@@ -520,14 +511,9 @@ def train(args):
                         if args.save_state:
                             train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
 
-                # self.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizer, text_encoder, unet)
-
-                # end of epoch
-
-            prof.export_chrome_trace(args.profiler_output)
-            print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
+                prof.export_chrome_trace(args.profiler_output)
+                print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
     else:
-        # main training loop
         for epoch in range(num_train_epochs):
             accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
             current_epoch.value = epoch + 1
@@ -688,10 +674,6 @@ def train(args):
 
                     if args.save_state:
                         train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
-
-            # self.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizer, text_encoder, unet)
-
-            # end of epoch
 
     if is_main_process:
         network = accelerator.unwrap_model(network)

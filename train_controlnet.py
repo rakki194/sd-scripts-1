@@ -335,17 +335,17 @@ def train(args):
 
     # 学習する
     # TODO: find a way to handle total batch size when there are multiple datasets
-    accelerator.print("running training / 学習開始")
-    accelerator.print(f"  num train images * repeats / 学習画像の数×繰り返し回数: {train_dataset_group.num_train_images}")
-    accelerator.print(f"  num reg images / 正則化画像の数: {train_dataset_group.num_reg_images}")
-    accelerator.print(f"  num batches per epoch / 1epochのバッチ数: {len(train_dataloader)}")
-    accelerator.print(f"  num epochs / epoch数: {num_train_epochs}")
+    accelerator.print("running training")
+    accelerator.print(f"  num train images * repeats: {train_dataset_group.num_train_images}")
+    accelerator.print(f"  num reg images: {train_dataset_group.num_reg_images}")
+    accelerator.print(f"  num batches per epoch: {len(train_dataloader)}")
+    accelerator.print(f"  num epochs: {num_train_epochs}")
     accelerator.print(
-        f"  batch size per device / バッチサイズ: {', '.join([str(d.batch_size) for d in train_dataset_group.datasets])}"
+        f"  batch size per device: {', '.join([str(d.batch_size) for d in train_dataset_group.datasets])}"
     )
     # logger.info(f"  total train batch size (with parallel & distributed & accumulation) / 総バッチサイズ（並列学習、勾配合計含む）: {total_batch_size}")
-    accelerator.print(f"  gradient accumulation steps / 勾配を合計するステップ数 = {args.gradient_accumulation_steps}")
-    accelerator.print(f"  total optimization steps / 学習ステップ数: {args.max_train_steps}")
+    accelerator.print(f"  gradient accumulation steps: {args.gradient_accumulation_steps}")
+    accelerator.print(f"  total optimization steps: {args.max_train_steps}")
 
     progress_bar = tqdm(
         range(args.max_train_steps),
@@ -421,7 +421,6 @@ def train(args):
     )
     if profiler_ctx:
         with profiler_ctx as prof:
-            # main training loop
             for epoch in range(num_train_epochs):
                 if is_main_process:
                     accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
@@ -597,11 +596,9 @@ def train(args):
                     controlnet=controlnet,
                 )
 
-                # end of epoch
             prof.export_chrome_trace(args.profiler_output)
             print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
     else:
-        # main training loop
         for epoch in range(num_train_epochs):
             if is_main_process:
                 accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")

@@ -537,17 +537,17 @@ class NetworkTrainer:
         # TODO: find a way to handle total batch size when there are multiple datasets
         total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
-        accelerator.print("running training / 学習開始")
-        accelerator.print(f"  num train images * repeats / 学習画像の数×繰り返し回数: {train_dataset_group.num_train_images}")
-        accelerator.print(f"  num reg images / 正則化画像の数: {train_dataset_group.num_reg_images}")
-        accelerator.print(f"  num batches per epoch / 1epochのバッチ数: {len(train_dataloader)}")
-        accelerator.print(f"  num epochs / epoch数: {num_train_epochs}")
+        accelerator.print("running training")
+        accelerator.print(f"  num train images * repeats: {train_dataset_group.num_train_images}")
+        accelerator.print(f"  num reg images: {train_dataset_group.num_reg_images}")
+        accelerator.print(f"  num batches per epoch: {len(train_dataloader)}")
+        accelerator.print(f"  num epochs: {num_train_epochs}")
         accelerator.print(
-            f"  batch size per device / バッチサイズ: {', '.join([str(d.batch_size) for d in train_dataset_group.datasets])}"
+            f"  batch size per device: {', '.join([str(d.batch_size) for d in train_dataset_group.datasets])}"
         )
         # accelerator.print(f"  total train batch size (with parallel & distributed & accumulation) / 総バッチサイズ（並列学習、勾配合計含む）: {total_batch_size}")
-        accelerator.print(f"  gradient accumulation steps / 勾配を合計するステップ数 = {args.gradient_accumulation_steps}")
-        accelerator.print(f"  total optimization steps / 学習ステップ数: {args.max_train_steps}")
+        accelerator.print(f"  gradient accumulation steps: {args.gradient_accumulation_steps}")
+        accelerator.print(f"  total optimization steps: {args.max_train_steps}")
 
         # TODO refactor metadata creation and move to util
         metadata = {
@@ -876,223 +876,219 @@ class NetworkTrainer:
                 initial_step -= len(train_dataloader)
             global_step = initial_step
 
-        for epoch in range(epoch_to_start, num_train_epochs):
-            accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
-            current_epoch.value = epoch + 1
-
-            metadata["ss_epoch"] = str(epoch + 1)
-
-            accelerator.unwrap_model(network).on_epoch_start(text_encoder, unet)
-
-            skipped_dataloader = None
-            if initial_step > 0:
-                skipped_dataloader = accelerator.skip_first_batches(train_dataloader, initial_step - 1)
-                initial_step = 1
-
-            for step, batch in enumerate(skipped_dataloader or train_dataloader):
-                current_step.value = global_step
+        profiler_ctx = (
+            torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+                record_shapes=True,
+                schedule=torch.profiler.schedule(wait=0, warmup=0, active=1000000, repeat=1),
+            ) if getattr(args, "profiler_output", None) else None
+        )
+        def run_training_loop(prof=None):
+            nonlocal initial_step, global_step
+            for epoch in range(epoch_to_start, num_train_epochs):
+                accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
+                current_epoch.value = epoch + 1
+                metadata["ss_epoch"] = str(epoch + 1)
+                accelerator.unwrap_model(network).on_epoch_start(text_encoder, unet)
+                skipped_dataloader = None
                 if initial_step > 0:
-                    initial_step -= 1
-                    continue
+                    skipped_dataloader = accelerator.skip_first_batches(train_dataloader, initial_step - 1)
+                    initial_step = 1
+                for step, batch in enumerate(skipped_dataloader or train_dataloader):
+                    current_step.value = global_step
+                    if initial_step > 0:
+                        initial_step -= 1
+                        continue
+                    with accelerator.accumulate(training_model):
+                        on_step_start(text_encoder, unet)
 
-                with accelerator.accumulate(training_model):
-                    on_step_start(text_encoder, unet)
-
-                    if "latents" in batch and batch["latents"] is not None:
-                        latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
-                    else:
-                        if args.vae_batch_size is None or len(batch["images"]) <= args.vae_batch_size:
-                            with torch.no_grad():
-                                # latentに変換
-                                latents = vae.encode(batch["images"].to(dtype=vae_dtype)).latent_dist.sample().to(dtype=weight_dtype)
+                        if "latents" in batch and batch["latents"] is not None:
+                            latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
                         else:
-                            chunks = [batch["images"][i:i + args.vae_batch_size] for i in range(0, len(batch["images"]), args.vae_batch_size)]
-                            list_latents = []
-                            for chunk in chunks:
+                            if args.vae_batch_size is None or len(batch["images"]) <= args.vae_batch_size:
                                 with torch.no_grad():
-                                # latentに変換
-                                    list_latents.append(vae.encode(chunk.to(dtype=vae_dtype)).latent_dist.sample().to(dtype=weight_dtype))
-                            latents = torch.cat(list_latents, dim=0)
-                            # NaNが含まれていれば警告を表示し0に置き換える
-                        if torch.any(torch.isnan(latents)):
-                            accelerator.print("NaN found in latents, replacing with zeros")
-                            latents = torch.nan_to_num(latents, 0, out=latents)
-                    latents = latents * self.vae_scale_factor
+                                    latents = vae.encode(batch["images"].to(dtype=vae_dtype)).latent_dist.sample().to(dtype=weight_dtype)
+                            else:
+                                chunks = [batch["images"][i:i + args.vae_batch_size] for i in range(0, len(batch["images"]), args.vae_batch_size)]
+                                list_latents = []
+                                for chunk in chunks:
+                                    with torch.no_grad():
+                                        list_latents.append(vae.encode(chunk.to(dtype=vae_dtype)).latent_dist.sample().to(dtype=weight_dtype))
+                                latents = torch.cat(list_latents, dim=0)
+                            if torch.any(torch.isnan(latents)):
+                                accelerator.print("NaN found in latents, replacing with zeros")
+                                latents = torch.nan_to_num(latents, 0, out=latents)
+                        latents = latents * self.vae_scale_factor
 
-                    # get multiplier for each sample
-                    if network_has_multiplier:
-                        multipliers = batch["network_multipliers"]
-                        # if all multipliers are same, use single multiplier
-                        if torch.all(multipliers == multipliers[0]):
-                            multipliers = multipliers[0].item()
-                        else:
-                            raise NotImplementedError("multipliers for each sample is not supported yet")
-                        # print(f"set multiplier: {multipliers}")
-                        accelerator.unwrap_model(network).set_multiplier(multipliers)
+                        if network_has_multiplier:
+                            multipliers = batch["network_multipliers"]
+                            if torch.all(multipliers == multipliers[0]):
+                                multipliers = multipliers[0].item()
+                            else:
+                                raise NotImplementedError("multipliers for each sample is not supported yet")
+                            accelerator.unwrap_model(network).set_multiplier(multipliers)
 
-                    with torch.set_grad_enabled(train_text_encoder), accelerator.autocast():
-                        # Get the text embedding for conditioning
-                        if args.weighted_captions:
-                            text_encoder_conds = get_weighted_text_embeddings(
-                                tokenizer,
-                                text_encoder,
-                                batch["captions"],
-                                accelerator.device,
-                                args.max_token_length // 75 if args.max_token_length else 1,
-                                clip_skip=args.clip_skip,
-                            )
-                        else:
-                            text_encoder_conds = self.get_text_cond(
-                                args, accelerator, batch, tokenizers, text_encoders, weight_dtype
-                            )
+                        with torch.set_grad_enabled(train_text_encoder), accelerator.autocast():
+                            if args.weighted_captions:
+                                text_encoder_conds = get_weighted_text_embeddings(
+                                    tokenizer,
+                                    text_encoder,
+                                    batch["captions"],
+                                    accelerator.device,
+                                    args.max_token_length // 75 if args.max_token_length else 1,
+                                    clip_skip=args.clip_skip,
+                                )
+                            else:
+                                text_encoder_conds = self.get_text_cond(
+                                    args, accelerator, batch, tokenizers, text_encoders, weight_dtype
+                                )
 
-                    # Sample noise, sample a random timestep for each image, and add noise to the latents,
-                    # with noise offset and/or multires noise if specified
-                    noise, noisy_latents, timesteps, huber_c = train_util.get_noise_noisy_latents_and_timesteps(
-                        args, noise_scheduler, latents
-                    )
-
-                    # ensure the hidden state will require grad
-                    if args.gradient_checkpointing:
-                        for x in noisy_latents:
-                            x.requires_grad_(True)
-                        for t in text_encoder_conds:
-                            t.requires_grad_(True)
-
-                    # Predict the noise residual
-                    with accelerator.autocast():
-                        noise_pred = self.call_unet(
-                            args,
-                            accelerator,
-                            unet,
-                            noisy_latents.requires_grad_(train_unet),
-                            timesteps,
-                            text_encoder_conds,
-                            batch,
-                            weight_dtype,
+                        noise, noisy_latents, timesteps, huber_c = train_util.get_noise_noisy_latents_and_timesteps(
+                            args, noise_scheduler, latents
                         )
 
-                    if args.v_parameterization:
-                        # v-parameterization training
-                        target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                        if args.gradient_checkpointing:
+                            for x in noisy_latents:
+                                x.requires_grad_(True)
+                            for t in text_encoder_conds:
+                                t.requires_grad_(True)
+
+                        with accelerator.autocast():
+                            noise_pred = self.call_unet(
+                                args,
+                                accelerator,
+                                unet,
+                                noisy_latents.requires_grad_(train_unet),
+                                timesteps,
+                                text_encoder_conds,
+                                batch,
+                                weight_dtype,
+                            )
+
+                        if args.v_parameterization:
+                            target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                        else:
+                            target = noise
+
+                        loss = train_util.conditional_loss(
+                            noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
+                        )
+                        if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
+                            loss = apply_masked_loss(loss, batch)
+                        loss = loss.mean([1, 2, 3])
+
+                        loss_weights = batch["loss_weights"]
+                        loss = loss * loss_weights
+
+                        if args.min_snr_gamma:
+                            loss = apply_snr_weight(loss, timesteps, noise_scheduler, args.min_snr_gamma, args.v_parameterization)
+                        if args.scale_v_pred_loss_like_noise_pred:
+                            loss = scale_v_prediction_loss_like_noise_prediction(loss, timesteps, noise_scheduler)
+                        if args.v_pred_like_loss:
+                            loss = add_v_prediction_like_loss(loss, timesteps, noise_scheduler, args.v_pred_like_loss)
+                        if args.debiased_estimation_loss:
+                            loss = apply_debiased_estimation(loss, timesteps, noise_scheduler, args.v_parameterization)
+
+                        loss = loss.mean()
+                        if getattr(args, "scale_mse_loss", None) is not None and args.loss_type == "l2":
+                            loss = loss * args.scale_mse_loss
+                        accelerator.backward(loss)
+                        if accelerator.sync_gradients:
+                            self.all_reduce_network(accelerator, network)
+                            if args.max_grad_norm != 0.0:
+                                params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
+                                accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+
+                        if optimizer.__class__.__name__ == "SPARKLES":
+                            for param in network.parameters():
+                                if param.grad is not None and param.grad.dtype != torch.float32:
+                                    param.grad.data = param.grad.data.to(torch.float32)
+
+                        if optimizer.__class__.__name__ == "SPARKLES" and getattr(args, "optimizer_profiling", False):
+                            train_util.optimizer_step_with_profiling(optimizer, profiling_enabled=True)
+                        else:
+                            optimizer.step()
+                        lr_scheduler.step()
+                        optimizer.zero_grad(set_to_none=True)
+
+                    if args.scale_weight_norms:
+                        keys_scaled, mean_norm, maximum_norm = accelerator.unwrap_model(network).apply_max_norm_regularization(
+                            args.scale_weight_norms, accelerator.device
+                        )
+                        max_mean_logs = {"Keys Scaled": keys_scaled, "Average key norm": mean_norm}
                     else:
-                        target = noise
+                        keys_scaled, mean_norm, maximum_norm = None, None, None
 
-                    loss = train_util.conditional_loss(
-                        noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
-                    )
-                    if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
-                        loss = apply_masked_loss(loss, batch)
-                    loss = loss.mean([1, 2, 3])
-
-                    loss_weights = batch["loss_weights"]  # 各sampleごとのweight
-                    loss = loss * loss_weights
-
-                    if args.min_snr_gamma:
-                        loss = apply_snr_weight(loss, timesteps, noise_scheduler, args.min_snr_gamma, args.v_parameterization)
-                    if args.scale_v_pred_loss_like_noise_pred:
-                        loss = scale_v_prediction_loss_like_noise_prediction(loss, timesteps, noise_scheduler)
-                    if args.v_pred_like_loss:
-                        loss = add_v_prediction_like_loss(loss, timesteps, noise_scheduler, args.v_pred_like_loss)
-                    if args.debiased_estimation_loss:
-                        loss = apply_debiased_estimation(loss, timesteps, noise_scheduler, args.v_parameterization)
-
-                    loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
-                    # Apply scaled MSE loss if enabled
-                    if getattr(args, "scale_mse_loss", None) is not None and args.loss_type == "l2":
-                        loss = loss * args.scale_mse_loss
-                    accelerator.backward(loss)
                     if accelerator.sync_gradients:
-                        self.all_reduce_network(accelerator, network)  # sync DDP grad manually
-                        if args.max_grad_norm != 0.0:
-                            params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
-                            accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+                        progress_bar.update(1)
+                        global_step += 1
 
-                    # Force gradients to float32 for fused CUDA kernel compatibility (only for SPARKLES)
-                    if optimizer.__class__.__name__ == "SPARKLES":
-                        for param in network.parameters():
-                            if param.grad is not None and param.grad.dtype != torch.float32:
-                                param.grad.data = param.grad.data.to(torch.float32)
+                        self.sample_images(accelerator, args, None, global_step, accelerator.device, vae, tokenizer, text_encoder, unet)
 
-                    if optimizer.__class__.__name__ == "SPARKLES" and getattr(args, "optimizer_profiling", False):
-                        train_util.optimizer_step_with_profiling(optimizer, profiling_enabled=True)
-                    else:
-                        optimizer.step()
-                    lr_scheduler.step()
-                    optimizer.zero_grad(set_to_none=True)
+                        if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
+                            accelerator.wait_for_everyone()
+                            if accelerator.is_main_process:
+                                ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
+                                save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
 
-                if args.scale_weight_norms:
-                    keys_scaled, mean_norm, maximum_norm = accelerator.unwrap_model(network).apply_max_norm_regularization(
-                        args.scale_weight_norms, accelerator.device
-                    )
-                    max_mean_logs = {"Keys Scaled": keys_scaled, "Average key norm": mean_norm}
-                else:
-                    keys_scaled, mean_norm, maximum_norm = None, None, None
+                                if args.save_state:
+                                    train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
 
-                # Checks if the accelerator has performed an optimization step behind the scenes
-                if accelerator.sync_gradients:
-                    progress_bar.update(1)
-                    global_step += 1
+                                remove_step_no = train_util.get_remove_step_no(args, global_step)
+                                if remove_step_no is not None:
+                                    remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
+                                    remove_model(remove_ckpt_name)
 
-                    self.sample_images(accelerator, args, None, global_step, accelerator.device, vae, tokenizer, text_encoder, unet)
+                    current_loss = loss.detach().item()
+                    loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
+                    avr_loss: float = loss_recorder.moving_average
+                    logs = {"avr_loss": avr_loss}
+                    progress_bar.set_postfix(**logs)
 
-                    # 指定ステップごとにモデルを保存
-                    if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
-                        accelerator.wait_for_everyone()
-                        if accelerator.is_main_process:
-                            ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
-                            save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
+                    if args.scale_weight_norms:
+                        progress_bar.set_postfix(**{**max_mean_logs, **logs})
 
-                            if args.save_state:
-                                train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
+                    if args.logging_dir is not None:
+                        logs = self.generate_step_logs(
+                            args, current_loss, avr_loss, lr_scheduler, lr_descriptions, keys_scaled, mean_norm, maximum_norm
+                        )
+                        accelerator.log(logs, step=global_step)
 
-                            remove_step_no = train_util.get_remove_step_no(args, global_step)
-                            if remove_step_no is not None:
-                                remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
-                                remove_model(remove_ckpt_name)
-
-                current_loss = loss.detach().item()
-                loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
-                avr_loss: float = loss_recorder.moving_average
-                logs = {"avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
-                progress_bar.set_postfix(**logs)
-
-                if args.scale_weight_norms:
-                    progress_bar.set_postfix(**{**max_mean_logs, **logs})
+                    if global_step >= args.max_train_steps:
+                        break
 
                 if args.logging_dir is not None:
-                    logs = self.generate_step_logs(
-                        args, current_loss, avr_loss, lr_scheduler, lr_descriptions, keys_scaled, mean_norm, maximum_norm
-                    )
-                    accelerator.log(logs, step=global_step)
+                    logs = {"loss/epoch": loss_recorder.moving_average}
+                    accelerator.log(logs, step=epoch + 1)
 
-                if global_step >= args.max_train_steps:
-                    break
+                accelerator.wait_for_everyone()
 
-            if args.logging_dir is not None:
-                logs = {"loss/epoch": loss_recorder.moving_average}
-                accelerator.log(logs, step=epoch + 1)
+                if args.save_every_n_epochs is not None:
+                    saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
+                    if is_main_process and saving:
+                        ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, epoch + 1)
+                        save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch + 1)
 
-            accelerator.wait_for_everyone()
+                        remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
+                        if remove_epoch_no is not None:
+                            remove_ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
+                            remove_model(remove_ckpt_name)
 
-            # 指定エポックごとにモデルを保存
-            if args.save_every_n_epochs is not None:
-                saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
-                if is_main_process and saving:
-                    ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, epoch + 1)
-                    save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch + 1)
+                        if args.save_state:
+                            train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
 
-                    remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
-                    if remove_epoch_no is not None:
-                        remove_ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
-                        remove_model(remove_ckpt_name)
+                self.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizer, text_encoder, unet)
 
-                    if args.save_state:
-                        train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
+                if prof is not None:
+                    prof.step()
 
-            self.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizer, text_encoder, unet)
-
-            # end of epoch
+        if profiler_ctx:
+            with profiler_ctx as prof:
+                run_training_loop(prof)
+                prof.export_chrome_trace(args.profiler_output)
+                print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
+        else:
+            run_training_loop()
 
         # metadata["ss_epoch"] = str(num_train_epochs)
         metadata["ss_training_finished_at"] = str(time.time())
@@ -1110,20 +1106,6 @@ class NetworkTrainer:
             save_model(ckpt_name, network, global_step, num_train_epochs, force_sync_upload=True)
 
             logger.info("model saved.")
-
-        profiler_ctx = (
-            torch.profiler.profile(
-                activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-                record_shapes=True,
-            ) if getattr(args, "profiler_output", None) else None
-        )
-        if profiler_ctx:
-            with profiler_ctx as prof:
-                self._train_loop(args, ...)
-                prof.export_chrome_trace(args.profiler_output)
-                print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
-        else:
-            self._train_loop(args, ...)
 
 
 def setup_parser() -> argparse.ArgumentParser:
