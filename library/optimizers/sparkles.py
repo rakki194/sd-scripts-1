@@ -273,15 +273,25 @@ class SPARKLES(Optimizer):
                 return result
 
     def _is_foreach_compatible(self, group):
-        # All tensors must be on the same device, same dtype, and not sparse
-        params = [p for p in group["params"] if p.grad is not None and not p.grad.is_sparse]
-        if not params:
-            return False
-        device = params[0].device
-        dtype = params[0].dtype
-        for p in params:
-            if p.device != device or p.dtype != dtype:
-                return False
+        # Check if we've already cached the result
+        if "foreach_compat" in group:
+            return group["foreach_compat"]
+        # Find the first param with a dense grad
+        for p in group["params"]:
+            if p.grad is not None and not p.grad.is_sparse:
+                device = p.device
+                dtype = p.dtype
+                break
+        else:
+            group["foreach_compat"] = False
+            return False  # No compatible params
+        # Check the rest for compatibility
+        for p in group["params"]:
+            if p.grad is not None and not p.grad.is_sparse:
+                if p.device != device or p.dtype != dtype:
+                    group["foreach_compat"] = False
+                    return False
+        group["foreach_compat"] = True
         return True
 
     def step(self, closure: Optional[Callable] = None):
