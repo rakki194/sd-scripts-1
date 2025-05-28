@@ -17,7 +17,12 @@ except ImportError:
 
 def copy_stochastic_(target: torch.Tensor, source: torch.Tensor, seed: int = None):
     """
-    CUDA version of copy_stochastic_ with optional seed.
+    Perform stochastic copy of float32 CUDA tensors with optional random seed.
+
+    Args:
+        target (torch.Tensor): Output tensor (float32, CUDA).
+        source (torch.Tensor): Input tensor (float32, CUDA).
+        seed (int, optional): Random seed for noise generation. If None, a random seed is used.
     """
     #if not target.is_cuda or not source.is_cuda:
     #    raise ValueError("Both tensors must be CUDA tensors")
@@ -29,9 +34,12 @@ def copy_stochastic_(target: torch.Tensor, source: torch.Tensor, seed: int = Non
 # New: bfloat16 wrapper
 def copy_stochastic_bf16_(target: torch.Tensor, source: torch.Tensor, seed: int):
     """
-    CUDA version of copy_stochastic_ for bfloat16 target and float32 source, with required seed.
-    Both tensors must be CUDA. Target must be bfloat16 and source must be float32.
-    Requires a seed for deterministic behavior.
+    Perform stochastic copy from float32 to bfloat16 CUDA tensors with required random seed.
+
+    Args:
+        target (torch.Tensor): Output tensor (bfloat16, CUDA).
+        source (torch.Tensor): Input tensor (float32, CUDA).
+        seed (int): Random seed for noise generation.
     """
     #if not target.is_cuda or not source.is_cuda:
     #    raise ValueError("Both tensors must be CUDA tensors")
@@ -43,9 +51,17 @@ def copy_stochastic_bf16_(target: torch.Tensor, source: torch.Tensor, seed: int)
 
 def fused_optimizer(param, ema, ema2, grad, lr, ema_beta, ema2_beta, seed: int):
     """
-    Fused CUDA kernel for param, ema, ema2 update with stochastic bfloat16 rounding.
-    All tensors must be CUDA, param/ema/ema2 bfloat16, grad float32.
-    Requires a seed for deterministic behavior.
+    Fused CUDA kernel for parameter, EMA, and EMA2 update with stochastic bfloat16 rounding.
+
+    Args:
+        param (torch.Tensor): Parameter tensor (bfloat16, CUDA).
+        ema (torch.Tensor): Exponential moving average tensor (bfloat16, CUDA).
+        ema2 (torch.Tensor): Exponential moving average of squared gradients (bfloat16, CUDA).
+        grad (torch.Tensor): Gradient tensor (float32, CUDA).
+        lr (float): Learning rate.
+        ema_beta (float): Decay rate for EMA.
+        ema2_beta (float): Decay rate for EMA2.
+        seed (int): Random seed for stochastic rounding.
     """
     #if not (param.is_cuda and ema.is_cuda and ema2.is_cuda and grad.is_cuda):
     #    raise ValueError("All tensors must be CUDA tensors")
@@ -59,8 +75,14 @@ def fused_optimizer(param, ema, ema2, grad, lr, ema_beta, ema2_beta, seed: int):
 
 def stochastic_bf16_rounding_(target: torch.Tensor, source: torch.Tensor, probability: float, magnitude: float, seed: int):
     """
-    CUDA version of stochastic BF16 rounding with probability and magnitude.
-    Both tensors must be CUDA. Target must be bfloat16 and source must be float32.
+    Perform stochastic BF16 rounding on CUDA tensors with configurable probability and magnitude.
+
+    Args:
+        target (torch.Tensor): Output tensor (bfloat16, CUDA).
+        source (torch.Tensor): Input tensor (float32, CUDA).
+        probability (float): Probability of applying noise to each element.
+        magnitude (float): Magnitude of noise to apply.
+        seed (int): Random seed for noise generation.
     """
     #if not target.is_cuda or not source.is_cuda:
     #    raise ValueError("Both tensors must be CUDA tensors")

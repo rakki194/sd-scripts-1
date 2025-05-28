@@ -3,12 +3,30 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_bf16.h>
 
+/*
+ * CUDA Kernels for Stochastic Copy, Stochastic BF16 Rounding, and Fused Optimizer
+ *
+ * This file implements CUDA kernels and their launchers for stochastic rounding
+ * and parameter updates for deep learning optimizers. The kernels include:
+ *   - Stochastic copy of float32 and bfloat16 tensors with random noise for improved training dynamics
+ *   - Stochastic BF16 rounding with configurable probability and magnitude
+ *   - Fused optimizer kernel for parameter, EMA, and EMA2 updates with stochastic rounding
+ *
+ * Kernels are designed for use with PyTorch custom extensions and are called from C++ wrappers.
+ */
+
 __device__ uint32_t xorshift32(uint32_t x) {
     x ^= x << 13;
     x ^= x >> 17;
     x ^= x << 5;
     return x;
 }
+
+/**
+ * @brief Simple xorshift32 pseudo-random number generator for device-side randomness.
+ * @param x Input seed value.
+ * @return Pseudo-random 32-bit unsigned integer.
+ */
 
 __global__ void copy_stochastic_cuda_kernel_vec4(
     float* __restrict__ target, const float* __restrict__ source, int64_t numel, uint64_t seed)
@@ -27,6 +45,16 @@ __global__ void copy_stochastic_cuda_kernel_vec4(
         }
     }
 }
+
+/**
+ * @brief CUDA kernel for stochastic copy of float32 tensors using vectorized (vec4) access.
+ * Adds random noise to the lower 16 bits of each float32 element for stochastic rounding.
+ *
+ * @param target Output float32 tensor (device pointer).
+ * @param source Input float32 tensor (device pointer).
+ * @param numel Number of elements to process.
+ * @param seed Random seed for noise generation.
+ */
 
 // Optimized bfloat16 stochastic rounding kernel
 __global__ void copy_stochastic_bf16_cuda_kernel(
@@ -51,6 +79,16 @@ __global__ void copy_stochastic_bf16_cuda_kernel(
     }
 }
 
+/**
+ * @brief CUDA kernel for stochastic copy from float32 to bfloat16 with random rounding.
+ * Adds random noise to the lower 16 bits before conversion to bfloat16 for improved training dynamics.
+ *
+ * @param target Output bfloat16 tensor (device pointer).
+ * @param source Input float32 tensor (device pointer).
+ * @param numel Number of elements to process.
+ * @param seed Random seed for noise generation.
+ */
+
 // C++-style launcher for float32
 void copy_stochastic_cuda_launcher(
     float* target, const float* source, int64_t numel, uint64_t seed, cudaStream_t stream)
@@ -63,6 +101,16 @@ void copy_stochastic_cuda_launcher(
     );
 }
 
+/**
+ * @brief Host launcher for copy_stochastic_cuda_kernel_vec4.
+ *
+ * @param target Output float32 tensor (device pointer).
+ * @param source Input float32 tensor (device pointer).
+ * @param numel Number of elements to process.
+ * @param seed Random seed for noise generation.
+ * @param stream CUDA stream to launch the kernel on.
+ */
+
 // C++-style launcher for bfloat16 (optimized)
 void copy_stochastic_bf16_cuda_launcher(
     __nv_bfloat16* target, const float* source, int64_t numel, uint64_t seed, cudaStream_t stream)
@@ -73,6 +121,16 @@ void copy_stochastic_bf16_cuda_launcher(
         target, source, numel, seed
     );
 }
+
+/**
+ * @brief Host launcher for copy_stochastic_bf16_cuda_kernel.
+ *
+ * @param target Output bfloat16 tensor (device pointer).
+ * @param source Input float32 tensor (device pointer).
+ * @param numel Number of elements to process.
+ * @param seed Random seed for noise generation.
+ * @param stream CUDA stream to launch the kernel on.
+ */
 
 __global__ void fused_optimizer_kernel(
     __nv_bfloat16* __restrict__ param,
@@ -113,6 +171,21 @@ __global__ void fused_optimizer_kernel(
     }
 }
 
+/**
+ * @brief CUDA kernel for fused parameter, EMA, and EMA2 update with stochastic bfloat16 rounding.
+ * Performs parameter update, EMA, and EMA2 update in a single kernel for efficiency.
+ *
+ * @param param Parameter tensor (bfloat16, device pointer).
+ * @param ema Exponential moving average tensor (bfloat16, device pointer).
+ * @param ema2 Exponential moving average of squared gradients (bfloat16, device pointer).
+ * @param grad Gradient tensor (float32, device pointer).
+ * @param numel Number of elements to process.
+ * @param lr Learning rate.
+ * @param ema_beta Decay rate for EMA.
+ * @param ema2_beta Decay rate for EMA2.
+ * @param seed Random seed for stochastic rounding.
+ */
+
 void fused_optimizer_kernel_launcher(
     __nv_bfloat16* param,
     __nv_bfloat16* ema,
@@ -131,6 +204,21 @@ void fused_optimizer_kernel_launcher(
         param, ema, ema2, grad, numel, lr, ema_beta, ema2_beta, seed
     );
 }
+
+/**
+ * @brief Host launcher for fused_optimizer_kernel.
+ *
+ * @param param Parameter tensor (bfloat16, device pointer).
+ * @param ema Exponential moving average tensor (bfloat16, device pointer).
+ * @param ema2 Exponential moving average of squared gradients (bfloat16, device pointer).
+ * @param grad Gradient tensor (float32, device pointer).
+ * @param numel Number of elements to process.
+ * @param lr Learning rate.
+ * @param ema_beta Decay rate for EMA.
+ * @param ema2_beta Decay rate for EMA2.
+ * @param seed Random seed for stochastic rounding.
+ * @param stream CUDA stream to launch the kernel on.
+ */
 
 // Stochastic BF16 rounding kernel (probability/magnitude, noise-based)
 __global__ void stochastic_bf16_rounding_kernel(
@@ -155,6 +243,18 @@ __global__ void stochastic_bf16_rounding_kernel(
     }
 }
 
+/**
+ * @brief CUDA kernel for stochastic BF16 rounding with configurable probability and magnitude.
+ * Adds noise to float32 input before conversion to bfloat16, controlled by probability and magnitude.
+ *
+ * @param target Output bfloat16 tensor (device pointer).
+ * @param source Input float32 tensor (device pointer).
+ * @param numel Number of elements to process.
+ * @param probability Probability of applying noise to each element.
+ * @param magnitude Magnitude of noise to apply.
+ * @param seed Random seed for noise generation.
+ */
+
 void stochastic_bf16_rounding_launcher(
     __nv_bfloat16* target,
     const float* source,
@@ -169,4 +269,16 @@ void stochastic_bf16_rounding_launcher(
     stochastic_bf16_rounding_kernel<<<blocks, threads, 0, stream>>>(
         target, source, numel, probability, magnitude, seed
     );
-} 
+}
+
+/**
+ * @brief Host launcher for stochastic_bf16_rounding_kernel.
+ *
+ * @param target Output bfloat16 tensor (device pointer).
+ * @param source Input float32 tensor (device pointer).
+ * @param numel Number of elements to process.
+ * @param probability Probability of applying noise to each element.
+ * @param magnitude Magnitude of noise to apply.
+ * @param seed Random seed for noise generation.
+ * @param stream CUDA stream to launch the kernel on.
+ */ 

@@ -5,6 +5,20 @@
 #include <cuda_bf16.h>
 #include <chrono>
 
+/*
+ * PyTorch CUDA Extension for Stochastic Copy, Stochastic BF16 Rounding, and Fused Optimizer
+ *
+ * This file provides C++ wrappers and PyBind11 bindings for CUDA kernels that perform:
+ *   - Stochastic copy of float32 and bfloat16 tensors with random noise
+ *   - Stochastic BF16 rounding with configurable probability and magnitude
+ *   - Fused optimizer kernel for parameter, EMA, and EMA2 updates with stochastic rounding
+ *
+ * These functions are designed to be called from Python via the torch extension mechanism.
+ *
+ * Author: [Your Name]
+ * Date: [Date]
+ */
+
 // Declare the launchers from the .cu file
 void copy_stochastic_cuda_launcher(
     float* target, const float* source, int64_t numel, uint64_t seed, cudaStream_t stream);
@@ -26,6 +40,13 @@ void fused_optimizer_kernel_launcher(
     uint64_t seed,
     cudaStream_t stream);
 
+/**
+ * @brief C++ wrapper for launching the CUDA kernel for stochastic copy of float32 tensors.
+ *
+ * @param target Output float32 tensor (PyTorch CUDA tensor).
+ * @param source Input float32 tensor (PyTorch CUDA tensor).
+ * @param seed Random seed for noise generation.
+ */
 void copy_stochastic_cuda(
     at::Tensor target, at::Tensor source, uint64_t seed)
 {
@@ -44,7 +65,13 @@ void copy_stochastic_cuda(
     );
 }
 
-// New: bfloat16 binding
+/**
+ * @brief C++ wrapper for launching the CUDA kernel for stochastic copy from float32 to bfloat16.
+ *
+ * @param target Output bfloat16 tensor (PyTorch CUDA tensor).
+ * @param source Input float32 tensor (PyTorch CUDA tensor).
+ * @param seed Random seed for noise generation.
+ */
 void copy_stochastic_bf16_cuda(
     at::Tensor target, at::Tensor source, uint64_t seed)
 {
@@ -63,6 +90,17 @@ void copy_stochastic_bf16_cuda(
     );
 }
 
+/**
+ * @brief C++ wrapper for launching the fused optimizer CUDA kernel for parameter, EMA, and EMA2 update.
+ *
+ * @param param Parameter tensor (bfloat16, PyTorch CUDA tensor).
+ * @param ema Exponential moving average tensor (bfloat16, PyTorch CUDA tensor).
+ * @param ema2 Exponential moving average of squared gradients (bfloat16, PyTorch CUDA tensor).
+ * @param grad Gradient tensor (float32, PyTorch CUDA tensor).
+ * @param lr Learning rate.
+ * @param ema_beta Decay rate for EMA.
+ * @param ema2_beta Decay rate for EMA2.
+ */
 void fused_optimizer(
     at::Tensor param,
     at::Tensor ema,
@@ -95,7 +133,12 @@ void fused_optimizer(
     );
 }
 
-// Original overloads for backward compatibility
+/**
+ * @brief Overload for copy_stochastic_cuda with automatic seed generation.
+ *
+ * @param target Output float32 tensor (PyTorch CUDA tensor).
+ * @param source Input float32 tensor (PyTorch CUDA tensor).
+ */
 void copy_stochastic_cuda(
     at::Tensor target, at::Tensor source)
 {
@@ -103,6 +146,12 @@ void copy_stochastic_cuda(
     copy_stochastic_cuda(target, source, seed);
 }
 
+/**
+ * @brief Overload for copy_stochastic_bf16_cuda with automatic seed generation.
+ *
+ * @param target Output bfloat16 tensor (PyTorch CUDA tensor).
+ * @param source Input float32 tensor (PyTorch CUDA tensor).
+ */
 void copy_stochastic_bf16_cuda(
     at::Tensor target, at::Tensor source)
 {
@@ -110,7 +159,15 @@ void copy_stochastic_bf16_cuda(
     copy_stochastic_bf16_cuda(target, source, seed);
 }
 
-// Add C++ wrapper for new kernel
+/**
+ * @brief C++ wrapper for launching the CUDA kernel for stochastic BF16 rounding with probability and magnitude.
+ *
+ * @param target Output bfloat16 tensor (PyTorch CUDA tensor).
+ * @param source Input float32 tensor (PyTorch CUDA tensor).
+ * @param probability Probability of applying noise to each element.
+ * @param magnitude Magnitude of noise to apply.
+ * @param seed Random seed for noise generation.
+ */
 void stochastic_bf16_rounding_cuda(
     at::Tensor target, at::Tensor source, float probability, float magnitude, uint64_t seed)
 {

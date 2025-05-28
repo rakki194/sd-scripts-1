@@ -1007,10 +1007,11 @@ class NetworkTrainer:
                             params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
                             accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
-                    # Force gradients to float32 for fused CUDA kernel compatibility
-                    for param in network.parameters():
-                        if param.grad is not None and param.grad.dtype != torch.float32:
-                            param.grad.data = param.grad.data.to(torch.float32)
+                    # Force gradients to float32 for fused CUDA kernel compatibility (only for SPARKLES)
+                    if optimizer.__class__.__name__ == "SPARKLES":
+                        for param in network.parameters():
+                            if param.grad is not None and param.grad.dtype != torch.float32:
+                                param.grad.data = param.grad.data.to(torch.float32)
 
                     optimizer.step()
                     lr_scheduler.step()
