@@ -3,6 +3,7 @@ from torch.optim import Optimizer
 from typing import Callable, Optional, Tuple
 
 from .copy_stochastic_cuda_wrapper import copy_stochastic_bf16_ as cuda_copy_stochastic_bf16_, fused_optimizer as cuda_fused_optimizer
+from .copy_stochastic_cuda_wrapper import stochastic_bf16_rounding_ as cuda_stochastic_bf16_rounding_
 
 class SPARKLES(Optimizer):
     r"""
@@ -250,26 +251,26 @@ class SPARKLES(Optimizer):
         else:
             # Use the original noise-based method
             # Convert to BF16 first
-            x_bf16 = x.to(torch.bfloat16)
-
-            # Get epsilon for BF16 if magnitude not specified
-            if magnitude is None:
-                magnitude = torch.finfo(torch.bfloat16).eps
-
-            # Create random mask based on probability
-            rand_mask = torch.rand_like(x, device=x.device) < probability
-
-            # Create noise tensor: positive or negative epsilon based on another random mask
-            sign_mask = torch.rand_like(x, device=x.device) < 0.5
-            noise = torch.ones_like(x, device=x.device)
-            noise = torch.where(sign_mask, noise, -noise)
-            noise = noise * magnitude
-
-            # Only apply noise where rand_mask is True
-            noise = torch.where(rand_mask, noise, torch.zeros_like(x, device=x.device))
-
-            # Add noise to BF16 tensor
-            return x_bf16 + noise.to(torch.bfloat16)
+            if not x.is_cuda:
+                x_bf16 = x.to(torch.bfloat16)
+                if magnitude is None:
+                    magnitude = torch.finfo(torch.bfloat16).eps
+                rand_mask = torch.rand_like(x, device=x.device) < probability
+                sign_mask = torch.rand_like(x, device=x.device) < 0.5
+                noise = torch.ones_like(x, device=x.device)
+                noise = torch.where(sign_mask, noise, -noise)
+                noise = noise * magnitude
+                noise = torch.where(rand_mask, noise, torch.zeros_like(x, device=x.device))
+                return x_bf16 + noise.to(torch.bfloat16)
+            else:
+                # Use CUDA kernel for stochastic BF16 rounding
+                if magnitude is None:
+                    magnitude = float(torch.finfo(torch.bfloat16).eps)
+                result = torch.empty_like(x, dtype=torch.bfloat16, device=x.device)
+                # Use a random seed for non-deterministic mode
+                seed = torch.randint(0, 2**31, ()).item()
+                cuda_stochastic_bf16_rounding_(result, x, float(probability), float(magnitude), int(seed))
+                return result
 
     def step(self, closure: Optional[Callable] = None):
         """Perform a single optimization step.

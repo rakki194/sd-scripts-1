@@ -128,4 +128,46 @@ void fused_optimizer_kernel_launcher(
     fused_optimizer_kernel<<<blocks, threads, 0, stream>>>(
         param, ema, ema2, grad, numel, lr, ema_beta, ema2_beta, seed
     );
+}
+
+// Stochastic BF16 rounding kernel (probability/magnitude, noise-based)
+__global__ void stochastic_bf16_rounding_kernel(
+    __nv_bfloat16* __restrict__ target,
+    const float* __restrict__ source,
+    int64_t numel,
+    float probability,
+    float magnitude,
+    uint64_t seed)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < numel) {
+        float src = __ldg(&source[idx]);
+        uint32_t rand_state = static_cast<uint32_t>(seed) ^ static_cast<uint32_t>(idx);
+        // Uniform random float in [0,1)
+        float rand_prob = (xorshift32(rand_state) & 0xFFFFFF) / float(0x1000000);
+        // Random sign
+        float sign = ((xorshift32(rand_state + 17) & 1) ? 1.0f : -1.0f);
+        float noise = 0.0f;
+        if (rand_prob < probability) {
+            noise = sign * magnitude;
+        }
+        float noisy = src + noise;
+        target[idx] = __float2bfloat16(noisy);
+    }
+}
+
+void stochastic_bf16_rounding_launcher(
+    __nv_bfloat16* target,
+    const float* source,
+    int64_t numel,
+    float probability,
+    float magnitude,
+    uint64_t seed,
+    cudaStream_t stream)
+{
+    int threads = 512;
+    int blocks = (numel + threads - 1) / threads;
+    stochastic_bf16_rounding_kernel<<<blocks, threads, 0, stream>>>(
+        target, source, numel, probability, magnitude, seed
+    );
 } 

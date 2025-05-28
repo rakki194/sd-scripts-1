@@ -10,6 +10,8 @@ void copy_stochastic_cuda_launcher(
     float* target, const float* source, int64_t numel, uint64_t seed, cudaStream_t stream);
 void copy_stochastic_bf16_cuda_launcher(
     __nv_bfloat16* target, const float* source, int64_t numel, uint64_t seed, cudaStream_t stream);
+void stochastic_bf16_rounding_launcher(
+    __nv_bfloat16* target, const float* source, int64_t numel, float probability, float magnitude, uint64_t seed, cudaStream_t stream);
 
 // Declare the fused optimizer launcher
 void fused_optimizer_kernel_launcher(
@@ -108,6 +110,21 @@ void copy_stochastic_bf16_cuda(
     copy_stochastic_bf16_cuda(target, source, seed);
 }
 
+// Add C++ wrapper for new kernel
+void stochastic_bf16_rounding_cuda(
+    at::Tensor target, at::Tensor source, float probability, float magnitude, uint64_t seed)
+{
+    stochastic_bf16_rounding_launcher(
+        reinterpret_cast<__nv_bfloat16*>(target.data_ptr<at::BFloat16>()),
+        source.data_ptr<float>(),
+        target.numel(),
+        probability,
+        magnitude,
+        seed,
+        at::cuda::getCurrentCUDAStream()
+    );
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("copy_stochastic_cuda", (void (*)(at::Tensor, at::Tensor, uint64_t)) &copy_stochastic_cuda, "Stochastic copy (CUDA) with seed");
     m.def("copy_stochastic_bf16_cuda", (void (*)(at::Tensor, at::Tensor, uint64_t)) &copy_stochastic_bf16_cuda, "Stochastic copy to bfloat16 (CUDA) with seed");
@@ -132,4 +149,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             at::cuda::getCurrentCUDAStream()
         );
     }, "Fused optimizer kernel (CUDA) with seed");
+    // Register new kernel
+    m.def("stochastic_bf16_rounding_cuda", &stochastic_bf16_rounding_cuda, "Stochastic BF16 rounding (CUDA) with probability and magnitude");
 } 
