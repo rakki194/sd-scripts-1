@@ -2,6 +2,12 @@
 #include <curand_kernel.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_bf16.h>
+#include <thrust/device_ptr.h>
+#include <thrust/sort.h>
+#include <thrust/gather.h>
+#include <cuda_runtime_api.h>
+#include <ATen/ATen.h>
+#include <thrust/execution_policy.h>
 
 __device__ uint32_t xorshift32(uint32_t x) {
     x ^= x << 13;
@@ -55,6 +61,7 @@ __global__ void copy_stochastic_bf16_cuda_kernel(
 void copy_stochastic_cuda_launcher(
     float* target, const float* source, int64_t numel, uint64_t seed, cudaStream_t stream)
 {
+    if (numel == 0) return;
     int threads = 512;
     int vec = 4;
     int blocks = (numel + threads * vec - 1) / (threads * vec);
@@ -67,6 +74,7 @@ void copy_stochastic_cuda_launcher(
 void copy_stochastic_bf16_cuda_launcher(
     __nv_bfloat16* target, const float* source, int64_t numel, uint64_t seed, cudaStream_t stream)
 {
+    if (numel == 0) return;
     int threads = 512; // Try 256, 512, 1024 for best performance on your GPU
     int blocks = (numel + threads - 1) / threads;
     copy_stochastic_bf16_cuda_kernel<<<blocks, threads, 0, stream>>>(
@@ -125,6 +133,7 @@ void fused_optimizer_kernel_launcher(
     uint64_t seed,
     cudaStream_t stream)
 {
+    if (numel == 0) return;
     int threads = 512;
     int blocks = (numel + threads - 1) / threads;
     fused_optimizer_kernel<<<blocks, threads, 0, stream>>>(
@@ -184,6 +193,7 @@ void fused_optimizer_kernel_vec4_launcher(
     uint64_t seed,
     cudaStream_t stream)
 {
+    if (numel == 0) return;
     int threads = 512;
     int vec = 4;
     int blocks = (numel + threads * vec - 1) / (threads * vec);
@@ -224,6 +234,7 @@ void stochastic_bf16_rounding_launcher(
     uint64_t seed,
     cudaStream_t stream)
 {
+    if (numel == 0) return;
     int threads = 512;
     int blocks = (numel + threads - 1) / threads;
     stochastic_bf16_rounding_kernel<<<blocks, threads, 0, stream>>>(
@@ -242,46 +253,70 @@ __global__ void normalize_gradient_cuda_kernel(float* x, int64_t numel, float al
 }
 
 // Channel-wise normalization kernel (for 2D: N x C)
-__global__ void normalize_gradient_channel_cuda_kernel(float* x, int64_t N, int64_t C, float alpha, float epsilon, const float* means, const float* stds) {
+__global__ void normalize_gradient_channel_cuda_kernel(float* x, int64_t N, int64_t C, float alpha, float epsilon, const float* stds) {
     int c = blockIdx.x;
     int n = threadIdx.x;
     if (c < C && n < N) {
         int idx = n * C + c;
         float v = x[idx];
-        float norm = (v - means[c]) / stds[c];
+        float norm = v / stds[c];
         x[idx] = (1.0f - alpha) * v + alpha * norm;
-    }
-}
-
-// Global permutation kernel (Fisher-Yates, one thread per element, not optimal but simple)
-__global__ void global_permutation_cuda_kernel(float* x, int64_t numel, uint64_t seed) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < numel) {
-        // Simple LCG for random index
-        uint64_t state = seed ^ idx;
-        state = state * 6364136223846793005ULL + 1;
-        int j = state % numel;
-        if (j != idx) {
-            float tmp = x[idx];
-            x[idx] = x[j];
-            x[j] = tmp;
-        }
     }
 }
 
 // Launchers
 void normalize_gradient_cuda_launcher(float* x, int64_t numel, float alpha, float epsilon, float mean, float std, cudaStream_t stream) {
+    if (numel == 0) return;
     int threads = 512;
     int blocks = (numel + threads - 1) / threads;
     normalize_gradient_cuda_kernel<<<blocks, threads, 0, stream>>>(x, numel, alpha, epsilon, mean, std);
 }
 
-void normalize_gradient_channel_cuda_launcher(float* x, int64_t N, int64_t C, float alpha, float epsilon, const float* means, const float* stds, cudaStream_t stream) {
-    normalize_gradient_channel_cuda_kernel<<<C, N, 0, stream>>>(x, N, C, alpha, epsilon, means, stds);
+void normalize_gradient_channel_cuda_launcher(float* x, int64_t N, int64_t C, float alpha, float epsilon, const float* stds, cudaStream_t stream) {
+    if (N == 0 || C == 0) return;
+    normalize_gradient_channel_cuda_kernel<<<C, N, 0, stream>>>(x, N, C, alpha, epsilon, stds);
+}
+
+__global__ void fill_indices_and_keys_kernel(int* indices, int* keys, int64_t numel, uint64_t seed) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < numel) {
+        indices[idx] = idx;
+        uint32_t x = static_cast<uint32_t>(idx) ^ static_cast<uint32_t>(seed);
+        x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+        keys[idx] = static_cast<int>(x);
+    }
+}
+
+void fill_indices_and_keys_launcher(int* indices, int* keys, int64_t numel, uint64_t seed, cudaStream_t stream) {
+    if (numel == 0) return;
+    int threads = 512;
+    int blocks = (numel + threads - 1) / threads;
+    fill_indices_and_keys_kernel<<<blocks, threads, 0, stream>>>(indices, keys, numel, seed);
 }
 
 void global_permutation_cuda_launcher(float* x, int64_t numel, uint64_t seed, cudaStream_t stream) {
-    int threads = 512;
-    int blocks = (numel + threads - 1) / threads;
-    global_permutation_cuda_kernel<<<blocks, threads, 0, stream>>>(x, numel, seed);
+    if (numel == 0) return;
+
+    // Allocate device memory for indices, keys, and out
+    int* indices;
+    int* keys;
+    float* out;
+    cudaMalloc(&indices, numel * sizeof(int));
+    cudaMalloc(&keys, numel * sizeof(int));
+    cudaMalloc(&out, numel * sizeof(float));
+
+    // Fill indices and keys
+    fill_indices_and_keys_launcher(indices, keys, numel, seed, stream);
+
+    // Use Thrust raw pointer interface with explicit stream
+    thrust::sort_by_key(thrust::cuda::par.on(stream), keys, keys + numel, indices);
+    thrust::gather(thrust::cuda::par.on(stream), indices, indices + numel, x, out);
+
+    // Copy back to x
+    cudaMemcpyAsync(x, out, numel * sizeof(float), cudaMemcpyDeviceToDevice, stream);
+
+    // Free device memory
+    cudaFree(indices);
+    cudaFree(keys);
+    cudaFree(out);
 } 

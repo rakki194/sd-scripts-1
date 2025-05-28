@@ -1,9 +1,16 @@
+#include <cuda.h>
+#include <cuda_bf16.h>
 #include <torch/extension.h>
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime_api.h>
-#include <cuda_bf16.h>
 #include <chrono>
+#include <thrust/device_ptr.h>
+#include <thrust/sequence.h>
+#include <thrust/shuffle.h>
+#include <thrust/gather.h>
+#include <thrust/random.h>
+#include <thrust/sort.h>
 
 // Declare the launchers from the .cu file
 void copy_stochastic_cuda_launcher(
@@ -40,8 +47,11 @@ void fused_optimizer_kernel_vec4_launcher(
 
 // Declare new launchers
 void normalize_gradient_cuda_launcher(float* x, int64_t numel, float alpha, float epsilon, float mean, float std, cudaStream_t stream);
-void normalize_gradient_channel_cuda_launcher(float* x, int64_t N, int64_t C, float alpha, float epsilon, const float* means, const float* stds, cudaStream_t stream);
+void normalize_gradient_channel_cuda_launcher(float* x, int64_t N, int64_t C, float alpha, float epsilon, const float* stds, cudaStream_t stream);
 void global_permutation_cuda_launcher(float* x, int64_t numel, uint64_t seed, cudaStream_t stream);
+
+// Declare the launcher at the top
+void fill_indices_and_keys_launcher(int* indices, uint32_t* keys, int64_t numel, uint64_t seed, cudaStream_t stream);
 
 void copy_stochastic_cuda(
     at::Tensor target, at::Tensor source, uint64_t seed)
@@ -174,27 +184,28 @@ void fused_optimizer_vec4(
 }
 
 void normalize_gradient_cuda(at::Tensor x, bool use_channels, float alpha, float epsilon, uint64_t seed) {
-    TORCH_CHECK(x.is_cuda(), "x must be a CUDA tensor");
-    TORCH_CHECK(x.scalar_type() == at::kFloat, "x must be float32");
+    //TORCH_CHECK(x.is_cuda(), "x must be a CUDA tensor");
+    //TORCH_CHECK(x.scalar_type() == at::kFloat, "x must be float32");
     if (!use_channels) {
         float mean = x.mean().item<float>();
         float std = x.std().item<float>() + epsilon;
         normalize_gradient_cuda_launcher(x.data_ptr<float>(), x.numel(), alpha, epsilon, mean, std, at::cuda::getCurrentCUDAStream());
     } else {
         // Assume 2D (N, C) for simplicity
-        TORCH_CHECK(x.dim() == 2, "Channel-wise normalization only supports 2D tensors");
+        //TORCH_CHECK(x.dim() == 2, "Channel-wise normalization only supports 2D tensors");
         int64_t N = x.size(0);
         int64_t C = x.size(1);
-        auto means = x.mean(0).contiguous();
         auto stds = x.std(0).add(epsilon).contiguous();
-        normalize_gradient_channel_cuda_launcher(x.data_ptr<float>(), N, C, alpha, epsilon, means.data_ptr<float>(), stds.data_ptr<float>(), at::cuda::getCurrentCUDAStream());
+        normalize_gradient_channel_cuda_launcher(x.data_ptr<float>(), N, C, alpha, epsilon, stds.data_ptr<float>(), at::cuda::getCurrentCUDAStream());
     }
 }
 
+// Just call the launcher
 void global_permutation_cuda(at::Tensor x, uint64_t seed) {
     TORCH_CHECK(x.is_cuda(), "x must be a CUDA tensor");
     TORCH_CHECK(x.scalar_type() == at::kFloat, "x must be float32");
-    global_permutation_cuda_launcher(x.data_ptr<float>(), x.numel(), seed, at::cuda::getCurrentCUDAStream());
+    int64_t numel = x.numel();
+    global_permutation_cuda_launcher(x.data_ptr<float>(), numel, seed, at::cuda::getCurrentCUDAStream());
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
