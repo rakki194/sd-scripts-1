@@ -67,3 +67,36 @@ def stochastic_bf16_rounding_(target: torch.Tensor, source: torch.Tensor, probab
     #if target.dtype != torch.bfloat16 or source.dtype != torch.float32:
     #    raise ValueError("Target must be bfloat16 and source must be float32")
     copy_stochastic_cuda.stochastic_bf16_rounding_cuda(target, source, float(probability), float(magnitude), int(seed))
+
+def fused_optimizer_vec4(param, ema, ema2, grad, lr, ema_beta, ema2_beta, seed: int):
+    """
+    Vectorized fused CUDA kernel for param, ema, ema2 update (4 elements per thread).
+    All tensors must be CUDA, param/ema/ema2 bfloat16, grad float32.
+    Requires a seed for deterministic behavior.
+    """
+    copy_stochastic_cuda.fused_optimizer_vec4(param, ema, ema2, grad, float(lr), float(ema_beta), float(ema2_beta), int(seed))
+
+def normalize_gradient_cuda_(x, use_channels=False, alpha=1.0, epsilon=1e-8, seed=None):
+    """
+    CUDA version of normalize_gradient. Normalizes x in-place.
+    Args:
+        x: float32 CUDA tensor
+        use_channels: if True, normalize per-channel (assumes 2D: N x C)
+        alpha: interpolation weight
+        epsilon: small value for numerical stability
+        seed: random seed (not used in current implementation, but reserved)
+    """
+    if seed is None:
+        seed = torch.randint(0, 2**31, ()).item()
+    copy_stochastic_cuda.normalize_gradient_cuda(x, bool(use_channels), float(alpha), float(epsilon), int(seed))
+
+def global_permutation_cuda_(x, seed=None):
+    """
+    CUDA version of global permutation. Shuffles x in-place.
+    Args:
+        x: float32 CUDA tensor
+        seed: random seed for permutation
+    """
+    if seed is None:
+        seed = torch.randint(0, 2**31, ()).item()
+    copy_stochastic_cuda.global_permutation_cuda(x, int(seed))
