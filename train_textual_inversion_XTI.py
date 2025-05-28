@@ -41,6 +41,7 @@ from library.utils import setup_logging, add_logging_arguments
 
 setup_logging()
 import logging
+import torch.profiler
 
 logger = logging.getLogger(__name__)
 
@@ -427,163 +428,338 @@ def train(args):
             logger.info(f"removing old checkpoint: {old_ckpt_file}")
             os.remove(old_ckpt_file)
 
-    # training loop
-    for epoch in range(num_train_epochs):
-        logger.info("")
-        logger.info(f"epoch {epoch+1}/{num_train_epochs}")
-        current_epoch.value = epoch + 1
+    profiler_ctx = (
+        torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            record_shapes=True,
+        ) if getattr(args, "profiler_output", None) else None
+    )
+    if profiler_ctx:
+        with profiler_ctx as prof:
+            # main training loop
+            for epoch in range(num_train_epochs):
+                logger.info("")
+                logger.info(f"epoch {epoch+1}/{num_train_epochs}")
+                current_epoch.value = epoch + 1
 
-        text_encoder.train()
+                text_encoder.train()
 
-        loss_total = 0
+                loss_total = 0
 
-        for step, batch in enumerate(train_dataloader):
-            current_step.value = global_step
-            with accelerator.accumulate(text_encoder):
-                with torch.no_grad():
-                    if "latents" in batch and batch["latents"] is not None:
-                        latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
-                    else:
-                        # latentに変換
-                        latents = vae.encode(batch["images"].to(dtype=weight_dtype)).latent_dist.sample()
-                    latents = latents * 0.18215
-                b_size = latents.shape[0]
+                for step, batch in enumerate(train_dataloader):
+                    current_step.value = global_step
+                    with accelerator.accumulate(text_encoder):
+                        with torch.no_grad():
+                            if "latents" in batch and batch["latents"] is not None:
+                                latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
+                            else:
+                                # latentに変換
+                                latents = vae.encode(batch["images"].to(dtype=weight_dtype)).latent_dist.sample()
+                            latents = latents * 0.18215
+                        b_size = latents.shape[0]
 
-                # Get the text embedding for conditioning
-                input_ids = batch["input_ids"].to(accelerator.device)
-                # weight_dtype) use float instead of fp16/bf16 because text encoder is float
-                encoder_hidden_states = torch.stack(
-                    [
-                        train_util.get_hidden_states(args, s, tokenizer, text_encoder, weight_dtype)
-                        for s in torch.split(input_ids, 1, dim=1)
-                    ]
-                )
-
-                # Sample noise, sample a random timestep for each image, and add noise to the latents,
-                # with noise offset and/or multires noise if specified
-                noise, noisy_latents, timesteps, huber_c = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents)
-
-                # Predict the noise residual
-                with accelerator.autocast():
-                    noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states=encoder_hidden_states).sample
-
-                if args.v_parameterization:
-                    # v-parameterization training
-                    target = noise_scheduler.get_velocity(latents, noise, timesteps)
-                else:
-                    target = noise
-
-                loss = train_util.conditional_loss(noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c)
-                if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
-                    loss = apply_masked_loss(loss, batch)
-                loss = loss.mean([1, 2, 3])
-
-                loss_weights = batch["loss_weights"]  # 各sampleごとのweight
-
-                loss = loss * loss_weights
-                if args.min_snr_gamma:
-                    loss = apply_snr_weight(loss, timesteps, noise_scheduler, args.min_snr_gamma, args.v_parameterization)
-                if args.scale_v_pred_loss_like_noise_pred:
-                    loss = scale_v_prediction_loss_like_noise_prediction(loss, timesteps, noise_scheduler)
-                if args.debiased_estimation_loss:
-                    loss = apply_debiased_estimation(loss, timesteps, noise_scheduler, args.v_parameterization)
-
-                loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
-
-                accelerator.backward(loss)
-                if accelerator.sync_gradients and args.max_grad_norm != 0.0:
-                    params_to_clip = text_encoder.get_input_embeddings().parameters()
-                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
-
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad(set_to_none=True)
-
-                # Let's make sure we don't update any embedding weights besides the newly added token
-                with torch.no_grad():
-                    accelerator.unwrap_model(text_encoder).get_input_embeddings().weight[index_no_updates] = orig_embeds_params[
-                        index_no_updates
-                    ]
-
-            # Checks if the accelerator has performed an optimization step behind the scenes
-            if accelerator.sync_gradients:
-                progress_bar.update(1)
-                global_step += 1
-                # TODO: fix sample_images
-                # train_util.sample_images(
-                #     accelerator, args, None, global_step, accelerator.device, vae, tokenizer, text_encoder, unet, prompt_replacement
-                # )
-
-                # 指定ステップごとにモデルを保存
-                if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
-                    accelerator.wait_for_everyone()
-                    if accelerator.is_main_process:
-                        updated_embs = (
-                            accelerator.unwrap_model(text_encoder)
-                            .get_input_embeddings()
-                            .weight[token_ids_XTI]
-                            .data.detach()
-                            .clone()
+                        # Get the text embedding for conditioning
+                        input_ids = batch["input_ids"].to(accelerator.device)
+                        # weight_dtype) use float instead of fp16/bf16 because text encoder is float
+                        encoder_hidden_states = torch.stack(
+                            [
+                                train_util.get_hidden_states(args, s, tokenizer, text_encoder, weight_dtype)
+                                for s in torch.split(input_ids, 1, dim=1)
+                            ]
                         )
 
-                        ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
-                        save_model(ckpt_name, updated_embs, global_step, epoch)
+                        # Sample noise, sample a random timestep for each image, and add noise to the latents,
+                        # with noise offset and/or multires noise if specified
+                        noise, noisy_latents, timesteps, huber_c = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents)
 
-                        if args.save_state:
-                            train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
+                        # Predict the noise residual
+                        with accelerator.autocast():
+                            noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states=encoder_hidden_states).sample
 
-                        remove_step_no = train_util.get_remove_step_no(args, global_step)
-                        if remove_step_no is not None:
-                            remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
+                        if args.v_parameterization:
+                            # v-parameterization training
+                            target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                        else:
+                            target = noise
+
+                        loss = train_util.conditional_loss(noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c)
+                        if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
+                            loss = apply_masked_loss(loss, batch)
+                        loss = loss.mean([1, 2, 3])
+
+                        loss_weights = batch["loss_weights"]  # 各sampleごとのweight
+
+                        loss = loss * loss_weights
+                        if args.min_snr_gamma:
+                            loss = apply_snr_weight(loss, timesteps, noise_scheduler, args.min_snr_gamma, args.v_parameterization)
+                        if args.scale_v_pred_loss_like_noise_pred:
+                            loss = scale_v_prediction_loss_like_noise_prediction(loss, timesteps, noise_scheduler)
+                        if args.debiased_estimation_loss:
+                            loss = apply_debiased_estimation(loss, timesteps, noise_scheduler, args.v_parameterization)
+
+                        loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
+
+                        accelerator.backward(loss)
+                        if accelerator.sync_gradients and args.max_grad_norm != 0.0:
+                            params_to_clip = text_encoder.get_input_embeddings().parameters()
+                            accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+
+                        if optimizer.__class__.__name__ == "SPARKLES" and getattr(args, "optimizer_profiling", False):
+                            train_util.optimizer_step_with_profiling(optimizer, profiling_enabled=True)
+                        else:
+                            optimizer.step()
+                        lr_scheduler.step()
+                        optimizer.zero_grad(set_to_none=True)
+
+                        # Let's make sure we don't update any embedding weights besides the newly added token
+                        with torch.no_grad():
+                            accelerator.unwrap_model(text_encoder).get_input_embeddings().weight[index_no_updates] = orig_embeds_params[
+                                index_no_updates
+                            ]
+
+                    # Checks if the accelerator has performed an optimization step behind the scenes
+                    if accelerator.sync_gradients:
+                        progress_bar.update(1)
+                        global_step += 1
+                        # TODO: fix sample_images
+                        # train_util.sample_images(
+                        #     accelerator, args, None, global_step, accelerator.device, vae, tokenizer, text_encoder, unet, prompt_replacement
+                        # )
+
+                        # 指定ステップごとにモデルを保存
+                        if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
+                            accelerator.wait_for_everyone()
+                            if accelerator.is_main_process:
+                                updated_embs = (
+                                    accelerator.unwrap_model(text_encoder)
+                                    .get_input_embeddings()
+                                    .weight[token_ids_XTI]
+                                    .data.detach()
+                                    .clone()
+                                )
+
+                                ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
+                                save_model(ckpt_name, updated_embs, global_step, epoch)
+
+                                if args.save_state:
+                                    train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
+
+                                remove_step_no = train_util.get_remove_step_no(args, global_step)
+                                if remove_step_no is not None:
+                                    remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
+                                    remove_model(remove_ckpt_name)
+
+                    current_loss = loss.detach().item()
+                    if args.logging_dir is not None:
+                        logs = {"loss": current_loss, "lr": float(lr_scheduler.get_last_lr()[0])}
+                        if (
+                            args.optimizer_type.lower().startswith("DAdapt".lower()) or args.optimizer_type.lower() == "Prodigy".lower()
+                        ):  # tracking d*lr value
+                            logs["lr/d*lr"] = (
+                                lr_scheduler.optimizers[0].param_groups[0]["d"] * lr_scheduler.optimizers[0].param_groups[0]["lr"]
+                            )
+                        accelerator.log(logs, step=global_step)
+
+                    loss_total += current_loss
+                    avr_loss = loss_total / (step + 1)
+                    logs = {"loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
+                    progress_bar.set_postfix(**logs)
+
+                    if global_step >= args.max_train_steps:
+                        break
+
+                if args.logging_dir is not None:
+                    logs = {"loss/epoch": loss_total / len(train_dataloader)}
+                    accelerator.log(logs, step=epoch + 1)
+
+                accelerator.wait_for_everyone()
+
+                updated_embs = accelerator.unwrap_model(text_encoder).get_input_embeddings().weight[token_ids_XTI].data.detach().clone()
+
+                if args.save_every_n_epochs is not None:
+                    saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
+                    if accelerator.is_main_process and saving:
+                        ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, epoch + 1)
+                        save_model(ckpt_name, updated_embs, epoch + 1, global_step)
+
+                        remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
+                        if remove_epoch_no is not None:
+                            remove_ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
                             remove_model(remove_ckpt_name)
 
-            current_loss = loss.detach().item()
-            if args.logging_dir is not None:
-                logs = {"loss": current_loss, "lr": float(lr_scheduler.get_last_lr()[0])}
-                if (
-                    args.optimizer_type.lower().startswith("DAdapt".lower()) or args.optimizer_type.lower() == "Prodigy".lower()
-                ):  # tracking d*lr value
-                    logs["lr/d*lr"] = (
-                        lr_scheduler.optimizers[0].param_groups[0]["d"] * lr_scheduler.optimizers[0].param_groups[0]["lr"]
+                        if args.save_state:
+                            train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
+
+                # TODO: fix sample_images
+                # train_util.sample_images(
+                #     accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizer, text_encoder, unet, prompt_replacement
+                # )
+
+                # end of epoch
+
+                prof.export_chrome_trace(args.profiler_output)
+                print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
+    else:
+        # main training loop
+        for epoch in range(num_train_epochs):
+            logger.info("")
+            logger.info(f"epoch {epoch+1}/{num_train_epochs}")
+            current_epoch.value = epoch + 1
+
+            text_encoder.train()
+
+            loss_total = 0
+
+            for step, batch in enumerate(train_dataloader):
+                current_step.value = global_step
+                with accelerator.accumulate(text_encoder):
+                    with torch.no_grad():
+                        if "latents" in batch and batch["latents"] is not None:
+                            latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
+                        else:
+                            # latentに変換
+                            latents = vae.encode(batch["images"].to(dtype=weight_dtype)).latent_dist.sample()
+                        latents = latents * 0.18215
+                    b_size = latents.shape[0]
+
+                    # Get the text embedding for conditioning
+                    input_ids = batch["input_ids"].to(accelerator.device)
+                    # weight_dtype) use float instead of fp16/bf16 because text encoder is float
+                    encoder_hidden_states = torch.stack(
+                        [
+                            train_util.get_hidden_states(args, s, tokenizer, text_encoder, weight_dtype)
+                            for s in torch.split(input_ids, 1, dim=1)
+                        ]
                     )
-                accelerator.log(logs, step=global_step)
 
-            loss_total += current_loss
-            avr_loss = loss_total / (step + 1)
-            logs = {"loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
-            progress_bar.set_postfix(**logs)
+                    # Sample noise, sample a random timestep for each image, and add noise to the latents,
+                    # with noise offset and/or multires noise if specified
+                    noise, noisy_latents, timesteps, huber_c = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents)
 
-            if global_step >= args.max_train_steps:
-                break
+                    # Predict the noise residual
+                    with accelerator.autocast():
+                        noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states=encoder_hidden_states).sample
 
-        if args.logging_dir is not None:
-            logs = {"loss/epoch": loss_total / len(train_dataloader)}
-            accelerator.log(logs, step=epoch + 1)
+                    if args.v_parameterization:
+                        # v-parameterization training
+                        target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                    else:
+                        target = noise
 
-        accelerator.wait_for_everyone()
+                    loss = train_util.conditional_loss(noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c)
+                    if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
+                        loss = apply_masked_loss(loss, batch)
+                    loss = loss.mean([1, 2, 3])
 
-        updated_embs = accelerator.unwrap_model(text_encoder).get_input_embeddings().weight[token_ids_XTI].data.detach().clone()
+                    loss_weights = batch["loss_weights"]  # 各sampleごとのweight
 
-        if args.save_every_n_epochs is not None:
-            saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
-            if accelerator.is_main_process and saving:
-                ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, epoch + 1)
-                save_model(ckpt_name, updated_embs, epoch + 1, global_step)
+                    loss = loss * loss_weights
+                    if args.min_snr_gamma:
+                        loss = apply_snr_weight(loss, timesteps, noise_scheduler, args.min_snr_gamma, args.v_parameterization)
+                    if args.scale_v_pred_loss_like_noise_pred:
+                        loss = scale_v_prediction_loss_like_noise_prediction(loss, timesteps, noise_scheduler)
+                    if args.debiased_estimation_loss:
+                        loss = apply_debiased_estimation(loss, timesteps, noise_scheduler, args.v_parameterization)
 
-                remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
-                if remove_epoch_no is not None:
-                    remove_ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
-                    remove_model(remove_ckpt_name)
+                    loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
 
-                if args.save_state:
-                    train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
+                    accelerator.backward(loss)
+                    if accelerator.sync_gradients and args.max_grad_norm != 0.0:
+                        params_to_clip = text_encoder.get_input_embeddings().parameters()
+                        accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
-        # TODO: fix sample_images
-        # train_util.sample_images(
-        #     accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizer, text_encoder, unet, prompt_replacement
-        # )
+                    if optimizer.__class__.__name__ == "SPARKLES" and getattr(args, "optimizer_profiling", False):
+                        train_util.optimizer_step_with_profiling(optimizer, profiling_enabled=True)
+                    else:
+                        optimizer.step()
+                    lr_scheduler.step()
+                    optimizer.zero_grad(set_to_none=True)
 
-        # end of epoch
+                    # Let's make sure we don't update any embedding weights besides the newly added token
+                    with torch.no_grad():
+                        accelerator.unwrap_model(text_encoder).get_input_embeddings().weight[index_no_updates] = orig_embeds_params[
+                            index_no_updates
+                        ]
+
+                # Checks if the accelerator has performed an optimization step behind the scenes
+                if accelerator.sync_gradients:
+                    progress_bar.update(1)
+                    global_step += 1
+                    # TODO: fix sample_images
+                    # train_util.sample_images(
+                    #     accelerator, args, None, global_step, accelerator.device, vae, tokenizer, text_encoder, unet, prompt_replacement
+                    # )
+
+                    # 指定ステップごとにモデルを保存
+                    if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
+                        accelerator.wait_for_everyone()
+                        if accelerator.is_main_process:
+                            updated_embs = (
+                                accelerator.unwrap_model(text_encoder)
+                                .get_input_embeddings()
+                                .weight[token_ids_XTI]
+                                .data.detach()
+                                .clone()
+                            )
+
+                            ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
+                            save_model(ckpt_name, updated_embs, global_step, epoch)
+
+                            if args.save_state:
+                                train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
+
+                            remove_step_no = train_util.get_remove_step_no(args, global_step)
+                            if remove_step_no is not None:
+                                remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
+                                remove_model(remove_ckpt_name)
+
+                current_loss = loss.detach().item()
+                if args.logging_dir is not None:
+                    logs = {"loss": current_loss, "lr": float(lr_scheduler.get_last_lr()[0])}
+                    if (
+                        args.optimizer_type.lower().startswith("DAdapt".lower()) or args.optimizer_type.lower() == "Prodigy".lower()
+                    ):  # tracking d*lr value
+                        logs["lr/d*lr"] = (
+                            lr_scheduler.optimizers[0].param_groups[0]["d"] * lr_scheduler.optimizers[0].param_groups[0]["lr"]
+                        )
+                    accelerator.log(logs, step=global_step)
+
+                loss_total += current_loss
+                avr_loss = loss_total / (step + 1)
+                logs = {"loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
+                progress_bar.set_postfix(**logs)
+
+                if global_step >= args.max_train_steps:
+                    break
+
+            if args.logging_dir is not None:
+                logs = {"loss/epoch": loss_total / len(train_dataloader)}
+                accelerator.log(logs, step=epoch + 1)
+
+            accelerator.wait_for_everyone()
+
+            updated_embs = accelerator.unwrap_model(text_encoder).get_input_embeddings().weight[token_ids_XTI].data.detach().clone()
+
+            if args.save_every_n_epochs is not None:
+                saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
+                if accelerator.is_main_process and saving:
+                    ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, epoch + 1)
+                    save_model(ckpt_name, updated_embs, epoch + 1, global_step)
+
+                    remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
+                    if remove_epoch_no is not None:
+                        remove_ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
+                        remove_model(remove_ckpt_name)
+
+                    if args.save_state:
+                        train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
+
+            # TODO: fix sample_images
+            # train_util.sample_images(
+            #     accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizer, text_encoder, unet, prompt_replacement
+            # )
+
+            # end of epoch
 
     is_main_process = accelerator.is_main_process
     if is_main_process:
@@ -705,6 +881,17 @@ def setup_parser() -> argparse.ArgumentParser:
         "--use_style_template",
         action="store_true",
         help="ignore caption and use default templates for stype / キャプションは使わずデフォルトのスタイル用テンプレートで学習する",
+    )
+    parser.add_argument(
+        "--optimizer_profiling",
+        action="store_true",
+        help="Enable PyTorch profiler for optimizer step (SPARKLES only)",
+    )
+    parser.add_argument(
+        "--profiler_output",
+        type=str,
+        default=None,
+        help="If set, enables PyTorch profiler and exports trace to this file (e.g. trace.json or a directory for TensorBoard)",
     )
 
     return parser

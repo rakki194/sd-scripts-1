@@ -39,6 +39,7 @@ from tqdm import tqdm
 
 import torch
 from library.device_utils import init_ipex, clean_memory_on_device
+import torch.profiler
 
 init_ipex()
 
@@ -6677,3 +6678,14 @@ class LossRecorder:
     @property
     def moving_average(self) -> float:
         return self.loss_total / len(self.loss_list)
+
+def optimizer_step_with_profiling(optimizer, profiling_enabled=False, profiler=None):
+    """
+    If profiling_enabled is True, wraps optimizer.step() with a record_function for profiling.
+    Optionally, a profiler context can be passed (for advanced use).
+    """
+    if profiling_enabled:
+        with torch.profiler.record_function("optimizer_step"):
+            return optimizer.step()
+    else:
+        return optimizer.step()

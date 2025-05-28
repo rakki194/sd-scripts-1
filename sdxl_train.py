@@ -750,7 +750,10 @@ def train(args):
                             params_to_clip.extend(m.parameters())
                         accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
-                    optimizer.step()
+                    if optimizer.__class__.__name__ == "SPARKLES" and getattr(args, "optimizer_profiling", False):
+                        train_util.optimizer_step_with_profiling(optimizer, profiling_enabled=True)
+                    else:
+                        optimizer.step()
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
                 else:
@@ -941,6 +944,11 @@ def setup_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="number of optimizers for fused backward pass and optimizer step / fused backward passとoptimizer stepのためのoptimizer数",
+    )
+    parser.add_argument(
+        "--optimizer_profiling",
+        action="store_true",
+        help="Enable PyTorch profiler for optimizer step (SPARKLES only)",
     )
     return parser
 

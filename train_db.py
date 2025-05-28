@@ -298,110 +298,161 @@ def train(args):
     train_util.sample_images(accelerator, args, 0, global_step, accelerator.device, vae, tokenizer, text_encoder, unet)
 
     loss_recorder = train_util.LossRecorder()
-    for epoch in range(num_train_epochs):
-        accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
-        current_epoch.value = epoch + 1
+    profiler_ctx = (
+        torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            record_shapes=True,
+        ) if getattr(args, "profiler_output", None) else None
+    )
+    if profiler_ctx:
+        with profiler_ctx as prof:
+            for epoch in range(num_train_epochs):
+                accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
+                current_epoch.value = epoch + 1
 
-        # 指定したステップ数までText Encoderを学習する：epoch最初の状態
-        unet.train()
-        # train==True is required to enable gradient_checkpointing
-        if args.gradient_checkpointing or global_step < args.stop_text_encoder_training:
-            text_encoder.train()
+                # 指定したステップ数までText Encoderを学習する：epoch最初の状態
+                unet.train()
+                # train==True is required to enable gradient_checkpointing
+                if args.gradient_checkpointing or global_step < args.stop_text_encoder_training:
+                    text_encoder.train()
 
-        for step, batch in enumerate(train_dataloader):
-            current_step.value = global_step
-            # 指定したステップ数でText Encoderの学習を止める
-            if global_step == args.stop_text_encoder_training:
-                accelerator.print(f"stop text encoder training at step {global_step}")
-                if not args.gradient_checkpointing:
-                    text_encoder.train(False)
-                text_encoder.requires_grad_(False)
-                if len(training_models) == 2:
-                    training_models = training_models[0]  # remove text_encoder from training_models
+                for step, batch in enumerate(train_dataloader):
+                    current_step.value = global_step
+                    # 指定したステップ数でText Encoderの学習を止める
+                    if global_step == args.stop_text_encoder_training:
+                        accelerator.print(f"stop text encoder training at step {global_step}")
+                        if not args.gradient_checkpointing:
+                            text_encoder.train(False)
+                        text_encoder.requires_grad_(False)
+                        if len(training_models) == 2:
+                            training_models = training_models[0]  # remove text_encoder from training_models
 
-            with accelerator.accumulate(*training_models):
-                with torch.no_grad():
-                    # latentに変換
-                    if cache_latents:
-                        latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
-                    else:
-                        latents = vae.encode(batch["images"].to(dtype=weight_dtype)).latent_dist.sample()
-                    latents = latents * 0.18215
-                b_size = latents.shape[0]
+                    with accelerator.accumulate(*training_models):
+                        with torch.no_grad():
+                            # latentに変換
+                            if cache_latents:
+                                latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
+                            else:
+                                latents = vae.encode(batch["images"].to(dtype=weight_dtype)).latent_dist.sample()
+                            latents = latents * 0.18215
+                        b_size = latents.shape[0]
 
-                # Get the text embedding for conditioning
-                with torch.set_grad_enabled(global_step < args.stop_text_encoder_training):
-                    if args.weighted_captions:
-                        encoder_hidden_states = get_weighted_text_embeddings(
-                            tokenizer,
-                            text_encoder,
-                            batch["captions"],
-                            accelerator.device,
-                            args.max_token_length // 75 if args.max_token_length else 1,
-                            clip_skip=args.clip_skip,
+                        # Get the text embedding for conditioning
+                        with torch.set_grad_enabled(global_step < args.stop_text_encoder_training):
+                            if args.weighted_captions:
+                                encoder_hidden_states = get_weighted_text_embeddings(
+                                    tokenizer,
+                                    text_encoder,
+                                    batch["captions"],
+                                    accelerator.device,
+                                    args.max_token_length // 75 if args.max_token_length else 1,
+                                    clip_skip=args.clip_skip,
+                                )
+                            else:
+                                input_ids = batch["input_ids"].to(accelerator.device)
+                                encoder_hidden_states = train_util.get_hidden_states(
+                                    args, input_ids, tokenizer, text_encoder, None if not args.full_fp16 else weight_dtype
+                                )
+
+                        # Sample noise, sample a random timestep for each image, and add noise to the latents,
+                        # with noise offset and/or multires noise if specified
+                        noise, noisy_latents, timesteps, huber_c = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents)
+
+                        # Predict the noise residual
+                        with accelerator.autocast():
+                            noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
+
+                        if args.v_parameterization:
+                            # v-parameterization training
+                            target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                        else:
+                            target = noise
+
+                        loss = train_util.conditional_loss(noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c)
+                        if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
+                            loss = apply_masked_loss(loss, batch)
+                        loss = loss.mean([1, 2, 3])
+
+                        loss_weights = batch["loss_weights"]  # 各sampleごとのweight
+                        loss = loss * loss_weights
+
+                        if args.min_snr_gamma:
+                            loss = apply_snr_weight(loss, timesteps, noise_scheduler, args.min_snr_gamma, args.v_parameterization)
+                        if args.scale_v_pred_loss_like_noise_pred:
+                            loss = scale_v_prediction_loss_like_noise_prediction(loss, timesteps, noise_scheduler)
+                        if args.debiased_estimation_loss:
+                            loss = apply_debiased_estimation(loss, timesteps, noise_scheduler, args.v_parameterization)
+
+                        loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
+                        # Apply scaled MSE loss if enabled
+                        if getattr(args, "scale_mse_loss", None) is not None and args.loss_type == "l2":
+                            loss = loss * args.scale_mse_loss
+                        accelerator.backward(loss)
+
+                        if optimizer.__class__.__name__ == "SPARKLES" and getattr(args, "optimizer_profiling", False):
+                            train_util.optimizer_step_with_profiling(optimizer, profiling_enabled=True)
+                        else:
+                            optimizer.step()
+                        lr_scheduler.step()
+                        optimizer.zero_grad(set_to_none=True)
+
+                    # Checks if the accelerator has performed an optimization step behind the scenes
+                    if accelerator.sync_gradients:
+                        progress_bar.update(1)
+                        global_step += 1
+
+                        train_util.sample_images(
+                            accelerator, args, None, global_step, accelerator.device, vae, tokenizer, text_encoder, unet
                         )
-                    else:
-                        input_ids = batch["input_ids"].to(accelerator.device)
-                        encoder_hidden_states = train_util.get_hidden_states(
-                            args, input_ids, tokenizer, text_encoder, None if not args.full_fp16 else weight_dtype
-                        )
 
-                # Sample noise, sample a random timestep for each image, and add noise to the latents,
-                # with noise offset and/or multires noise if specified
-                noise, noisy_latents, timesteps, huber_c = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents)
+                        # 指定ステップごとにモデルを保存
+                        if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
+                            accelerator.wait_for_everyone()
+                            if accelerator.is_main_process:
+                                src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
+                                train_util.save_sd_model_on_epoch_end_or_stepwise(
+                                    args,
+                                    False,
+                                    accelerator,
+                                    src_path,
+                                    save_stable_diffusion_format,
+                                    use_safetensors,
+                                    save_dtype,
+                                    epoch,
+                                    num_train_epochs,
+                                    global_step,
+                                    accelerator.unwrap_model(text_encoder),
+                                    accelerator.unwrap_model(unet),
+                                    vae,
+                                )
 
-                # Predict the noise residual
-                with accelerator.autocast():
-                    noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
+                    current_loss = loss.detach().item()
+                    if args.logging_dir is not None:
+                        logs = {"loss": current_loss}
+                        train_util.append_lr_to_logs(logs, lr_scheduler, args.optimizer_type, including_unet=True)
+                        accelerator.log(logs, step=global_step)
 
-                if args.v_parameterization:
-                    # v-parameterization training
-                    target = noise_scheduler.get_velocity(latents, noise, timesteps)
-                else:
-                    target = noise
+                    loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
+                    avr_loss: float = loss_recorder.moving_average
+                    logs = {"avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
+                    progress_bar.set_postfix(**logs)
 
-                loss = train_util.conditional_loss(noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c)
-                if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
-                    loss = apply_masked_loss(loss, batch)
-                loss = loss.mean([1, 2, 3])
+                    if global_step >= args.max_train_steps:
+                        break
 
-                loss_weights = batch["loss_weights"]  # 各sampleごとのweight
-                loss = loss * loss_weights
+                if args.logging_dir is not None:
+                    logs = {"loss/epoch": loss_recorder.moving_average}
+                    accelerator.log(logs, step=epoch + 1)
 
-                if args.min_snr_gamma:
-                    loss = apply_snr_weight(loss, timesteps, noise_scheduler, args.min_snr_gamma, args.v_parameterization)
-                if args.scale_v_pred_loss_like_noise_pred:
-                    loss = scale_v_prediction_loss_like_noise_prediction(loss, timesteps, noise_scheduler)
-                if args.debiased_estimation_loss:
-                    loss = apply_debiased_estimation(loss, timesteps, noise_scheduler, args.v_parameterization)
+                accelerator.wait_for_everyone()
 
-                loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
-                # Apply scaled MSE loss if enabled
-                if getattr(args, "scale_mse_loss", None) is not None and args.loss_type == "l2":
-                    loss = loss * args.scale_mse_loss
-                accelerator.backward(loss)
-
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad(set_to_none=True)
-
-            # Checks if the accelerator has performed an optimization step behind the scenes
-            if accelerator.sync_gradients:
-                progress_bar.update(1)
-                global_step += 1
-
-                train_util.sample_images(
-                    accelerator, args, None, global_step, accelerator.device, vae, tokenizer, text_encoder, unet
-                )
-
-                # 指定ステップごとにモデルを保存
-                if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
-                    accelerator.wait_for_everyone()
+                if args.save_every_n_epochs is not None:
                     if accelerator.is_main_process:
+                        # checking for saving is in util
                         src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
                         train_util.save_sd_model_on_epoch_end_or_stepwise(
                             args,
-                            False,
+                            True,
                             accelerator,
                             src_path,
                             save_stable_diffusion_format,
@@ -415,47 +466,173 @@ def train(args):
                             vae,
                         )
 
-            current_loss = loss.detach().item()
+                train_util.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizer, text_encoder, unet)
+
+                prof.export_chrome_trace(args.profiler_output)
+                print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
+
+    else:
+        for epoch in range(num_train_epochs):
+            accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
+            current_epoch.value = epoch + 1
+
+            # 指定したステップ数までText Encoderを学習する：epoch最初の状態
+            unet.train()
+            # train==True is required to enable gradient_checkpointing
+            if args.gradient_checkpointing or global_step < args.stop_text_encoder_training:
+                text_encoder.train()
+
+            for step, batch in enumerate(train_dataloader):
+                current_step.value = global_step
+                # 指定したステップ数でText Encoderの学習を止める
+                if global_step == args.stop_text_encoder_training:
+                    accelerator.print(f"stop text encoder training at step {global_step}")
+                    if not args.gradient_checkpointing:
+                        text_encoder.train(False)
+                    text_encoder.requires_grad_(False)
+                    if len(training_models) == 2:
+                        training_models = training_models[0]  # remove text_encoder from training_models
+
+                with accelerator.accumulate(*training_models):
+                    with torch.no_grad():
+                        # latentに変換
+                        if cache_latents:
+                            latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
+                        else:
+                            latents = vae.encode(batch["images"].to(dtype=weight_dtype)).latent_dist.sample()
+                        latents = latents * 0.18215
+                    b_size = latents.shape[0]
+
+                    # Get the text embedding for conditioning
+                    with torch.set_grad_enabled(global_step < args.stop_text_encoder_training):
+                        if args.weighted_captions:
+                            encoder_hidden_states = get_weighted_text_embeddings(
+                                tokenizer,
+                                text_encoder,
+                                batch["captions"],
+                                accelerator.device,
+                                args.max_token_length // 75 if args.max_token_length else 1,
+                                clip_skip=args.clip_skip,
+                            )
+                        else:
+                            input_ids = batch["input_ids"].to(accelerator.device)
+                            encoder_hidden_states = train_util.get_hidden_states(
+                                args, input_ids, tokenizer, text_encoder, None if not args.full_fp16 else weight_dtype
+                            )
+
+                    # Sample noise, sample a random timestep for each image, and add noise to the latents,
+                    # with noise offset and/or multires noise if specified
+                    noise, noisy_latents, timesteps, huber_c = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents)
+
+                    # Predict the noise residual
+                    with accelerator.autocast():
+                        noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
+
+                    if args.v_parameterization:
+                        # v-parameterization training
+                        target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                    else:
+                        target = noise
+
+                    loss = train_util.conditional_loss(noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c)
+                    if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
+                        loss = apply_masked_loss(loss, batch)
+                    loss = loss.mean([1, 2, 3])
+
+                    loss_weights = batch["loss_weights"]  # 各sampleごとのweight
+                    loss = loss * loss_weights
+
+                    if args.min_snr_gamma:
+                        loss = apply_snr_weight(loss, timesteps, noise_scheduler, args.min_snr_gamma, args.v_parameterization)
+                    if args.scale_v_pred_loss_like_noise_pred:
+                        loss = scale_v_prediction_loss_like_noise_prediction(loss, timesteps, noise_scheduler)
+                    if args.debiased_estimation_loss:
+                        loss = apply_debiased_estimation(loss, timesteps, noise_scheduler, args.v_parameterization)
+
+                    loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
+                    # Apply scaled MSE loss if enabled
+                    if getattr(args, "scale_mse_loss", None) is not None and args.loss_type == "l2":
+                        loss = loss * args.scale_mse_loss
+                    accelerator.backward(loss)
+
+                    if optimizer.__class__.__name__ == "SPARKLES" and getattr(args, "optimizer_profiling", False):
+                        train_util.optimizer_step_with_profiling(optimizer, profiling_enabled=True)
+                    else:
+                        optimizer.step()
+                    lr_scheduler.step()
+                    optimizer.zero_grad(set_to_none=True)
+
+                # Checks if the accelerator has performed an optimization step behind the scenes
+                if accelerator.sync_gradients:
+                    progress_bar.update(1)
+                    global_step += 1
+
+                    train_util.sample_images(
+                        accelerator, args, None, global_step, accelerator.device, vae, tokenizer, text_encoder, unet
+                    )
+
+                    # 指定ステップごとにモデルを保存
+                    if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
+                        accelerator.wait_for_everyone()
+                        if accelerator.is_main_process:
+                            src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
+                            train_util.save_sd_model_on_epoch_end_or_stepwise(
+                                args,
+                                False,
+                                accelerator,
+                                src_path,
+                                save_stable_diffusion_format,
+                                use_safetensors,
+                                save_dtype,
+                                epoch,
+                                num_train_epochs,
+                                global_step,
+                                accelerator.unwrap_model(text_encoder),
+                                accelerator.unwrap_model(unet),
+                                vae,
+                            )
+
+                current_loss = loss.detach().item()
+                if args.logging_dir is not None:
+                    logs = {"loss": current_loss}
+                    train_util.append_lr_to_logs(logs, lr_scheduler, args.optimizer_type, including_unet=True)
+                    accelerator.log(logs, step=global_step)
+
+                loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
+                avr_loss: float = loss_recorder.moving_average
+                logs = {"avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
+                progress_bar.set_postfix(**logs)
+
+                if global_step >= args.max_train_steps:
+                    break
+
             if args.logging_dir is not None:
-                logs = {"loss": current_loss}
-                train_util.append_lr_to_logs(logs, lr_scheduler, args.optimizer_type, including_unet=True)
-                accelerator.log(logs, step=global_step)
+                logs = {"loss/epoch": loss_recorder.moving_average}
+                accelerator.log(logs, step=epoch + 1)
 
-            loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
-            avr_loss: float = loss_recorder.moving_average
-            logs = {"avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
-            progress_bar.set_postfix(**logs)
+            accelerator.wait_for_everyone()
 
-            if global_step >= args.max_train_steps:
-                break
+            if args.save_every_n_epochs is not None:
+                if accelerator.is_main_process:
+                    # checking for saving is in util
+                    src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
+                    train_util.save_sd_model_on_epoch_end_or_stepwise(
+                        args,
+                        True,
+                        accelerator,
+                        src_path,
+                        save_stable_diffusion_format,
+                        use_safetensors,
+                        save_dtype,
+                        epoch,
+                        num_train_epochs,
+                        global_step,
+                        accelerator.unwrap_model(text_encoder),
+                        accelerator.unwrap_model(unet),
+                        vae,
+                    )
 
-        if args.logging_dir is not None:
-            logs = {"loss/epoch": loss_recorder.moving_average}
-            accelerator.log(logs, step=epoch + 1)
-
-        accelerator.wait_for_everyone()
-
-        if args.save_every_n_epochs is not None:
-            if accelerator.is_main_process:
-                # checking for saving is in util
-                src_path = src_stable_diffusion_ckpt if save_stable_diffusion_format else src_diffusers_model_path
-                train_util.save_sd_model_on_epoch_end_or_stepwise(
-                    args,
-                    True,
-                    accelerator,
-                    src_path,
-                    save_stable_diffusion_format,
-                    use_safetensors,
-                    save_dtype,
-                    epoch,
-                    num_train_epochs,
-                    global_step,
-                    accelerator.unwrap_model(text_encoder),
-                    accelerator.unwrap_model(unet),
-                    vae,
-                )
-
-        train_util.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizer, text_encoder, unet)
+            train_util.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizer, text_encoder, unet)
 
     is_main_process = accelerator.is_main_process
     if is_main_process:
@@ -512,6 +689,17 @@ def setup_parser() -> argparse.ArgumentParser:
         "--no_half_vae",
         action="store_true",
         help="do not use fp16/bf16 VAE in mixed precision (use float VAE) / mixed precisionでも fp16/bf16 VAEを使わずfloat VAEを使う",
+    )
+    parser.add_argument(
+        "--optimizer_profiling",
+        action="store_true",
+        help="Enable PyTorch profiler for optimizer step (SPARKLES only)",
+    )
+    parser.add_argument(
+        "--profiler_output",
+        type=str,
+        default=None,
+        help="If set, enables PyTorch profiler and exports trace to this file (e.g. trace.json or a directory for TensorBoard)",
     )
 
     return parser

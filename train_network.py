@@ -42,6 +42,7 @@ from library.utils import setup_logging, add_logging_arguments
 
 setup_logging()
 import logging
+import torch.profiler
 
 logger = logging.getLogger(__name__)
 
@@ -1013,7 +1014,10 @@ class NetworkTrainer:
                             if param.grad is not None and param.grad.dtype != torch.float32:
                                 param.grad.data = param.grad.data.to(torch.float32)
 
-                    optimizer.step()
+                    if optimizer.__class__.__name__ == "SPARKLES" and getattr(args, "optimizer_profiling", False):
+                        train_util.optimizer_step_with_profiling(optimizer, profiling_enabled=True)
+                    else:
+                        optimizer.step()
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
 
@@ -1106,6 +1110,20 @@ class NetworkTrainer:
             save_model(ckpt_name, network, global_step, num_train_epochs, force_sync_upload=True)
 
             logger.info("model saved.")
+
+        profiler_ctx = (
+            torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+                record_shapes=True,
+            ) if getattr(args, "profiler_output", None) else None
+        )
+        if profiler_ctx:
+            with profiler_ctx as prof:
+                self._train_loop(args, ...)
+                prof.export_chrome_trace(args.profiler_output)
+                print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
+        else:
+            self._train_loop(args, ...)
 
 
 def setup_parser() -> argparse.ArgumentParser:
@@ -1229,9 +1247,17 @@ def setup_parser() -> argparse.ArgumentParser:
         help="initial step number including all epochs, 0 means first step (same as not specifying). overwrites initial_epoch."
         + " / 初期ステップ数、全エポックを含むステップ数、0で最初のステップ（未指定時と同じ）。initial_epochを上書きする",
     )
-    # parser.add_argument("--loraplus_lr_ratio", default=None, type=float, help="LoRA+ learning rate ratio")
-    # parser.add_argument("--loraplus_unet_lr_ratio", default=None, type=float, help="LoRA+ UNet learning rate ratio")
-    # parser.add_argument("--loraplus_text_encoder_lr_ratio", default=None, type=float, help="LoRA+ text encoder learning rate ratio")
+    parser.add_argument(
+        "--optimizer_profiling",
+        action="store_true",
+        help="Enable PyTorch profiler for optimizer step (SPARKLES only)",
+    )
+    parser.add_argument(
+        "--profiler_output",
+        type=str,
+        default=None,
+        help="If set, enables PyTorch profiler and exports trace to this file (e.g. trace.json or a directory for TensorBoard)",
+    )
     return parser
 
 
