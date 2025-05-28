@@ -2,7 +2,7 @@ import torch
 from torch.optim import Optimizer
 from typing import Callable, Optional, Tuple
 
-from .copy_stochastic_cuda_wrapper import copy_stochastic_bf16_ as cuda_copy_stochastic_bf16_, fused_optimizer_vec4 as cuda_fused_optimizer_vec4, normalize_gradient_cuda_, global_permutation_cuda_
+from .copy_stochastic_cuda_wrapper import copy_stochastic_bf16_ as cuda_copy_stochastic_bf16_, fused_optimizer as cuda_fused_optimizer
 from .copy_stochastic_cuda_wrapper import stochastic_bf16_rounding_ as cuda_stochastic_bf16_rounding_
 
 class SPARKLES(Optimizer):
@@ -150,15 +150,47 @@ class SPARKLES(Optimizer):
         epsilon: float = 1e-8,
     ) -> None:
         """
-        Deprecated: Use CUDA-backed version instead.
+        Normalizes the input gradient tensor using its standard deviation, optionally channel-wise.
+
+        This function interpolates between the original gradient and its normalized version (divided by its 
+        standard deviation), controlled by the parameter `alpha`. If `use_channels` is True and the tensor has
+        more than one dimension, normalization is performed across all dimensions except the first (typically
+        the batch dimension), provided all reduction dimensions have more than one element.
+        Otherwise, normalization is performed globally if the tensor has more than two elements.
+
+        Args:
+            x (torch.Tensor): The gradient tensor to normalize (in-place).
+            use_channels (bool, optional): If True, normalize per-channel (across all but the first dimension). 
+            Default: False.
+            alpha (float, optional): Interpolation weight between the original and normalized gradient.
+            Default: 1.0.
+            epsilon (float, optional): Small value added to the standard deviation for numerical stability.
+            Default: 1e-8.
         """
-        normalize_gradient_cuda_(x, use_channels=use_channels, alpha=alpha, epsilon=epsilon)
+        size: int = x.dim()
+        if size > 1 and use_channels:
+            reduce_dims = tuple(range(1, size))
+            # Only normalize if all reduction dims have more than 1 element
+            if all(x.size(d) > 1 for d in reduce_dims):
+                s = x.std(dim=reduce_dims, keepdim=True).add_(epsilon)
+                x.lerp_(x.div_(s), weight=alpha)
+        elif torch.numel(x) > 2:
+            s = x.std().add_(epsilon)
+            x.lerp_(x.div_(s), weight=alpha)
 
     def apply_global_permutation(self, x: torch.Tensor) -> None:
+        """Apply global permutation - shuffles all elements randomly.
+
+        :param x: torch.Tensor. Tensor to permute.
         """
-        Deprecated: Use CUDA-backed version instead.
-        """
-        global_permutation_cuda_(x)
+        if x.dim() > 1:
+            # For ND tensors (N>1), shuffle along first dimension
+            perm_idx = torch.randperm(x.size(0), device=x.device)
+            x.copy_(x[perm_idx])
+        else:
+            # For 1D tensors, permute all elements
+            perm_idx = torch.randperm(x.numel(), device=x.device)
+            x.copy_(x[perm_idx])
 
     def apply_stochastic_operator(
         self,
@@ -326,7 +358,9 @@ class SPARKLES(Optimizer):
 
                 # Normalize the gradient
                 if normalization != 0:
-                    normalize_gradient_cuda_(grad_fp32, use_channels=normalize_channels, alpha=normalization)
+                    self.normalize_gradient(
+                        grad_fp32, use_channels=normalize_channels, alpha=normalization
+                    )
 
                 # Bias correction
                 bias_correction = 1 - beta1 ** state["step"]
@@ -359,13 +393,10 @@ class SPARKLES(Optimizer):
                     grad_diff_norm = torch.norm(grad_fp32 - prev_grad_fp32)
                     if grad_diff_norm < stochastic_threshold:
                         # Apply stochastic operator to update vector with selected strategy
-                        if permutation_strategy == "global":
-                            global_permutation_cuda_(update)
-                        else:
-                            self.apply_stochastic_operator(
-                                update,
-                                strategy=permutation_strategy,
-                            )
+                        self.apply_stochastic_operator(
+                            update,
+                            strategy=permutation_strategy,
+                        )
                         state["stochastic_applied"] = True
                     else:
                         state["stochastic_applied"] = False
@@ -387,8 +418,8 @@ class SPARKLES(Optimizer):
                     ema_squared.dtype == torch.bfloat16 and ema_squared.is_cuda and
                     grad.dtype == torch.float32 and grad.is_cuda
                 ):
-                    # Use vectorized fused CUDA kernel for param, ema, ema2
-                    cuda_fused_optimizer_vec4(p.data, ema, ema_squared, grad, lr, beta1, beta2, param_seed)
+                    # Use fused CUDA kernel for param, ema, ema2
+                    cuda_fused_optimizer(p.data, ema, ema_squared, grad, lr, beta1, beta2, param_seed)
                     # Update prev_grad as before
                     if prev_grad.dtype == torch.bfloat16 and prev_grad.is_cuda:
                         if use_stochastic_rounding and use_bit_manipulation:
