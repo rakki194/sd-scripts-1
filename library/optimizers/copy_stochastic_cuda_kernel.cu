@@ -20,7 +20,7 @@ __global__ void copy_stochastic_cuda_kernel_vec4(
         if (tidx < numel) {
             uint32_t rand_state = static_cast<uint32_t>(seed) ^ static_cast<uint32_t>(tidx);
             uint32_t rand16 = xorshift32(rand_state) & 0xFFFF;
-            int32_t src_bits = __float_as_int(source[tidx]);
+            int32_t src_bits = __float_as_int(__ldg(&source[tidx]));
             int32_t result = src_bits + rand16;
             result &= 0xFFFF0000;
             target[tidx] = __int_as_float(result);
@@ -86,6 +86,8 @@ __global__ void fused_optimizer_kernel(
     uint64_t seed)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    float inv_ema_beta = 1.0f - ema_beta;
+    float inv_ema2_beta = 1.0f - ema2_beta;
     if (idx < numel) {
         // param update
         float p = __bfloat162float(param[idx]);
@@ -99,14 +101,14 @@ __global__ void fused_optimizer_kernel(
         float rounded_p = __int_as_float(result);
         param[idx] = __float2bfloat16(rounded_p);
 
-        // ema update
+        // ema update (fused multiply-add)
         float e = __bfloat162float(ema[idx]);
-        float new_e = ema_beta * e + (1.0f - ema_beta) * rounded_p;
+        float new_e = __fmaf_rn(inv_ema_beta, rounded_p, ema_beta * e);
         ema[idx] = __float2bfloat16(new_e);
 
-        // ema2 update
+        // ema2 update (fused multiply-add)
         float e2 = __bfloat162float(ema2[idx]);
-        float new_e2 = ema2_beta * e2 + (1.0f - ema2_beta) * (g * g);
+        float new_e2 = __fmaf_rn(inv_ema2_beta, g * g, ema2_beta * e2);
         ema2[idx] = __float2bfloat16(new_e2);
     }
 }
@@ -140,17 +142,14 @@ __global__ void stochastic_bf16_rounding_kernel(
     uint64_t seed)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const float kFloat24 = 16777216.0f; // 0x1000000
     if (idx < numel) {
         float src = __ldg(&source[idx]);
         uint32_t rand_state = static_cast<uint32_t>(seed) ^ static_cast<uint32_t>(idx);
-        // Uniform random float in [0,1)
-        float rand_prob = (xorshift32(rand_state) & 0xFFFFFF) / float(0x1000000);
-        // Random sign
+        float rand_prob = (xorshift32(rand_state) & 0xFFFFFF) / kFloat24;
         float sign = ((xorshift32(rand_state + 17) & 1) ? 1.0f : -1.0f);
-        float noise = 0.0f;
-        if (rand_prob < probability) {
-            noise = sign * magnitude;
-        }
+        // Branchless noise logic
+        float noise = (rand_prob < probability) ? (sign * magnitude) : 0.0f;
         float noisy = src + noise;
         target[idx] = __float2bfloat16(noisy);
     }
