@@ -967,6 +967,7 @@ class NetworkTrainer:
                             loss = train_util.conditional_loss(
                                 noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
                             )
+<<<<<<< HEAD
                             if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
                                 loss = apply_masked_loss(loss, batch)
                             loss = loss.mean([1, 2, 3])
@@ -1049,6 +1050,108 @@ class NetworkTrainer:
                             remove_epoch_no = train_util.get_remove_epoch_no(args, epoch + 1)
                             if remove_epoch_no is not None:
                                 remove_ckpt_name = train_util.get_epoch_ckpt_name(args, "." + args.save_model_as, remove_epoch_no)
+=======
+
+                    # Sample noise, sample a random timestep for each image, and add noise to the latents,
+                    # with noise offset and/or multires noise if specified
+                    noise, noisy_latents, timesteps, huber_c = train_util.get_noise_noisy_latents_and_timesteps(
+                        args, noise_scheduler, latents
+                    )
+
+                    # ensure the hidden state will require grad
+                    if args.gradient_checkpointing:
+                        for x in noisy_latents:
+                            x.requires_grad_(True)
+                        for t in text_encoder_conds:
+                            t.requires_grad_(True)
+
+                    # Predict the noise residual
+                    with accelerator.autocast():
+                        noise_pred = self.call_unet(
+                            args,
+                            accelerator,
+                            unet,
+                            noisy_latents.requires_grad_(train_unet),
+                            timesteps,
+                            text_encoder_conds,
+                            batch,
+                            weight_dtype,
+                        )
+
+                    if args.v_parameterization:
+                        # v-parameterization training
+                        target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                    else:
+                        target = noise
+
+                    loss = train_util.conditional_loss(
+                        noise_pred.float(), target.float(), reduction="none", loss_type=args.loss_type, huber_c=huber_c
+                    )
+                    if args.masked_loss or ("alpha_masks" in batch and batch["alpha_masks"] is not None):
+                        loss = apply_masked_loss(loss, batch)
+                    loss = loss.mean([1, 2, 3])
+
+                    loss_weights = batch["loss_weights"]  # 各sampleごとのweight
+                    loss = loss * loss_weights
+
+                    if args.min_snr_gamma:
+                        loss = apply_snr_weight(loss, timesteps, noise_scheduler, args.min_snr_gamma, args.v_parameterization)
+                    if args.scale_v_pred_loss_like_noise_pred:
+                        loss = scale_v_prediction_loss_like_noise_prediction(loss, timesteps, noise_scheduler)
+                    if args.v_pred_like_loss:
+                        loss = add_v_prediction_like_loss(loss, timesteps, noise_scheduler, args.v_pred_like_loss)
+                    if args.debiased_estimation_loss:
+                        loss = apply_debiased_estimation(loss, timesteps, noise_scheduler, args.v_parameterization)
+
+                    loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
+                    # Apply scaled MSE loss if enabled
+                    if getattr(args, "scale_mse_loss", None) is not None and args.loss_type == "l2":
+                        loss = loss * args.scale_mse_loss
+                    accelerator.backward(loss)
+                    if accelerator.sync_gradients:
+                        self.all_reduce_network(accelerator, network)  # sync DDP grad manually
+                        if args.max_grad_norm != 0.0:
+                            params_to_clip = accelerator.unwrap_model(network).get_trainable_params()
+                            accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+
+                    # Force gradients to float32 for fused CUDA kernel compatibility
+                    for param in network.parameters():
+                        if param.grad is not None and param.grad.dtype != torch.float32:
+                            param.grad.data = param.grad.data.to(torch.float32)
+
+                    optimizer.step()
+                    lr_scheduler.step()
+                    optimizer.zero_grad(set_to_none=True)
+
+                if args.scale_weight_norms:
+                    keys_scaled, mean_norm, maximum_norm = accelerator.unwrap_model(network).apply_max_norm_regularization(
+                        args.scale_weight_norms, accelerator.device
+                    )
+                    max_mean_logs = {"Keys Scaled": keys_scaled, "Average key norm": mean_norm}
+                else:
+                    keys_scaled, mean_norm, maximum_norm = None, None, None
+
+                # Checks if the accelerator has performed an optimization step behind the scenes
+                if accelerator.sync_gradients:
+                    progress_bar.update(1)
+                    global_step += 1
+
+                    self.sample_images(accelerator, args, None, global_step, accelerator.device, vae, tokenizer, text_encoder, unet)
+
+                    # 指定ステップごとにモデルを保存
+                    if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
+                        accelerator.wait_for_everyone()
+                        if accelerator.is_main_process:
+                            ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, global_step)
+                            save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
+
+                            if args.save_state:
+                                train_util.save_and_remove_state_stepwise(args, accelerator, global_step)
+
+                            remove_step_no = train_util.get_remove_step_no(args, global_step)
+                            if remove_step_no is not None:
+                                remove_ckpt_name = train_util.get_step_ckpt_name(args, "." + args.save_model_as, remove_step_no)
+>>>>>>> parent of fbc3abf (~)
                                 remove_model(remove_ckpt_name)
                             if args.save_state:
                                 train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)

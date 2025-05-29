@@ -272,20 +272,13 @@ class SPARKLES(Optimizer):
                 cuda_stochastic_bf16_rounding_(result, x, float(probability), float(magnitude), int(seed))
                 return result
 
-    def _is_foreach_compatible(self, group):
-        # All tensors must be on the same device, same dtype, and not sparse
-        params = [p for p in group["params"] if p.grad is not None and not p.grad.is_sparse]
-        if not params:
-            return False
-        device = params[0].device
-        dtype = params[0].dtype
-        for p in params:
-            if p.device != device or p.dtype != dtype:
-                return False
-        return True
-
     def step(self, closure: Optional[Callable] = None):
-        """Perform a single optimization step, using foreach if possible."""
+        """Perform a single optimization step.
+
+        Args:
+            closure (Callable, optional):
+                A closure that reevaluates the model and returns the loss.
+        """
         loss = None
         if closure is not None:
             loss = closure()
@@ -310,18 +303,15 @@ class SPARKLES(Optimizer):
             permutation_strategy = group["permutation_strategy"]
             deterministic_seed = group["deterministic_seed"]
 
-            # Determine foreach compatibility
-            foreach = group.get("foreach", None)
-            if foreach is None:
-                foreach = self._is_foreach_compatible(group)
-                group["foreach"] = foreach
-
-            # Collect compatible tensors for foreach
-            active_p, grads, emas, ema_sqs, prev_grads, states = [], [], [], [], [], []
-            for p in group["params"]:
-                if p.grad is None or p.grad.is_sparse:
+            for i, p in enumerate(group["params"]):
+                if p.grad is None:
                     continue
+                grad = p.grad.data
+                if grad.is_sparse:
+                    raise RuntimeError("SPARKLES does not support sparse gradients")
+
                 state = self.state[p]
+
                 # State initialization
                 if len(state) == 0:
                     state["step"] = 0
@@ -329,245 +319,199 @@ class SPARKLES(Optimizer):
                     state["ema_squared"] = torch.zeros_like(p.data)
                     state["prev_grad"] = torch.zeros_like(p.data)
                     state["stochastic_applied"] = False
-                active_p.append(p)
-                grads.append(p.grad.data)
-                emas.append(state["ema"])
-                ema_sqs.append(state["ema_squared"])
-                prev_grads.append(state["prev_grad"])
-                states.append(state)
 
-            if foreach and len(active_p) > 0:
-                # Only support foreach for float32 or float16 on CUDA/CPU for now
-                # (BF16, stochastic, and CUDA fused logic must remain per-param)
-                # Center and normalize gradients
-                if centralization != 0:
-                    means = [g.mean(dim=tuple(range(1, g.dim())), keepdim=True) * centralization for g in grads]
-                    torch._foreach_sub_(grads, means)
-                if normalization != 0:
-                    # No foreach for normalize_gradient, fallback to per-tensor
-                    for g in grads:
-                        self.normalize_gradient(g, use_channels=normalize_channels, alpha=normalization)
-                # Bias correction
-                steps = [s["step"] + 1 for s in states]
+                ema, ema_squared = state["ema"], state["ema_squared"]
+                prev_grad = state["prev_grad"]
                 beta1, beta2 = betas
-                bias_correction = [1 - beta1 ** step for step in steps]
-                bias_correction_sqrt = [(1 - beta2 ** step) ** 0.5 for step in steps]
-                step_sizes = [lr / bc for bc in bias_correction]
-                # Update EMA and EMA2
-                torch._foreach_mul_(emas, beta1)
-                torch._foreach_add_(emas, grads, alpha=1 - beta1)
+                state["step"] += 1
+
+                # Use float32 for calculations, will convert back to BF16 later
+                grad_fp32 = grad.to(torch.float32)
+                p_fp32 = (
+                    p.data.to(torch.float32)
+                    if p.data.dtype == torch.bfloat16
+                    else p.data.clone()
+                )
+                ema_fp32 = (
+                    ema.to(torch.float32)
+                    if ema.dtype == torch.bfloat16
+                    else ema.clone()
+                )
+                ema_squared_fp32 = (
+                    ema_squared.to(torch.float32)
+                    if ema_squared.dtype == torch.bfloat16
+                    else ema_squared.clone()
+                )
+                prev_grad_fp32 = (
+                    prev_grad.to(torch.float32)
+                    if prev_grad.dtype == torch.bfloat16
+                    else prev_grad.clone()
+                )
+
+                # Center the gradient
+                if centralization != 0:
+                    grad_fp32.sub_(
+                        grad_fp32.mean(
+                            dim=tuple(range(1, grad_fp32.dim())), keepdim=True
+                        ).mul_(centralization)
+                    )
+
+                # Normalize the gradient
+                if normalization != 0:
+                    self.normalize_gradient(
+                        grad_fp32, use_channels=normalize_channels, alpha=normalization
+                    )
+
+                # Bias correction
+                bias_correction = 1 - beta1 ** state["step"]
+                bias_correction_sqrt = (1 - beta2 ** state["step"]) ** 0.5
+                step_size = lr / bias_correction
+
+                # Update EMA of gradient
+                ema_fp32.mul_(beta1).add_(grad_fp32, alpha=1 - beta1)
                 # Amplify gradient with EMA
-                torch._foreach_add_(grads, emas, alpha=amp_fac)
-                torch._foreach_mul_(ema_sqs, beta2)
-                torch._foreach_addcmul_(ema_sqs, grads, grads, value=1 - beta2)
-                # Compute denom
-                denoms = [es.sqrt().div(bcs).add(eps) for es, bcs in zip(ema_sqs, bias_correction_sqrt)]
+                grad_fp32.add_(ema_fp32, alpha=amp_fac)
+                # Update EMA of squared gradient
+                ema_squared_fp32.mul_(beta2).addcmul_(
+                    grad_fp32, grad_fp32, value=1 - beta2
+                )
+
+                # Compute denominator
+                denom = ema_squared_fp32.sqrt().div_(bias_correction_sqrt).add_(eps)
+
                 # Prepare update
-                updates = []
-                for i, (g, d, p) in enumerate(zip(grads, denoms, active_p)):
-                    if decouple_weight_decay and weight_decay != 0:
-                        p.data.mul_(1 - step_sizes[i] * weight_decay)
-                        update = g.div(d).mul(step_sizes[i])
+                if decouple_weight_decay and weight_decay != 0:
+                    p_fp32.mul_(1 - step_size * weight_decay)
+                    update = grad_fp32.div(denom).mul(step_size)
+                else:
+                    if weight_decay != 0:
+                        grad_fp32.add_(p_fp32, alpha=weight_decay)
+                    update = grad_fp32.div(denom).mul(step_size)
+
+                # Check if gradient hasn't changed much (possible saddle point or local minimum)
+                if state["step"] > 1:
+                    grad_diff_norm = torch.norm(grad_fp32 - prev_grad_fp32)
+                    if grad_diff_norm < stochastic_threshold:
+                        # Apply stochastic operator to update vector with selected strategy
+                        self.apply_stochastic_operator(
+                            update,
+                            strategy=permutation_strategy,
+                        )
+                        state["stochastic_applied"] = True
                     else:
-                        if weight_decay != 0:
-                            g.add_(p.data, alpha=weight_decay)
-                        update = g.div(d).mul(step_sizes[i])
-                    # Stochastic operator (per-param)
-                    if steps[i] > 1:
-                        grad_diff_norm = torch.norm(g - prev_grads[i])
-                        if grad_diff_norm < stochastic_threshold:
-                            self.apply_stochastic_operator(update, strategy=permutation_strategy)
-                            states[i]["stochastic_applied"] = True
-                        else:
-                            states[i]["stochastic_applied"] = False
-                    # Gradient clipping
-                    if clip_gradients and clip_lambda is not None:
-                        clip = clip_lambda(steps[i])
-                        update.clamp_(-clip, clip)
-                    updates.append(update)
-                # Update parameters
-                for i, p in enumerate(active_p):
-                    p.data.sub_(updates[i])
-                    # Update prev_grad
-                    prev_grads[i].copy_(grads[i])
-                    # Update state step
-                    states[i]["step"] = steps[i]
-                # Update state tensors
-                for i, s in enumerate(states):
-                    s["ema"] = emas[i]
-                    s["ema_squared"] = ema_sqs[i]
-                    s["prev_grad"] = prev_grads[i]
-            else:
-                # Fallback to per-parameter logic (original code)
-                for i, p in enumerate(group["params"]):
-                    if p.grad is None:
-                        continue
-                    grad = p.grad.data
-                    if grad.is_sparse:
-                        raise RuntimeError("SPARKLES does not support sparse gradients")
-                    state = self.state[p]
-                    if len(state) == 0:
-                        state["step"] = 0
-                        state["ema"] = torch.zeros_like(p.data)
-                        state["ema_squared"] = torch.zeros_like(p.data)
-                        state["prev_grad"] = torch.zeros_like(p.data)
                         state["stochastic_applied"] = False
-                    ema, ema_squared = state["ema"], state["ema_squared"]
-                    prev_grad = state["prev_grad"]
-                    beta1, beta2 = betas
-                    state["step"] += 1
-                    grad_fp32 = grad.to(torch.float32)
-                    p_fp32 = (
-                        p.data.to(torch.float32)
-                        if p.data.dtype == torch.bfloat16
-                        else p.data.clone()
-                    )
-                    ema_fp32 = (
-                        ema.to(torch.float32)
-                        if ema.dtype == torch.bfloat16
-                        else ema.clone()
-                    )
-                    ema_squared_fp32 = (
-                        ema_squared.to(torch.float32)
-                        if ema_squared.dtype == torch.bfloat16
-                        else ema_squared.clone()
-                    )
-                    prev_grad_fp32 = (
-                        prev_grad.to(torch.float32)
-                        if prev_grad.dtype == torch.bfloat16
-                        else prev_grad.clone()
-                    )
-                    if centralization != 0:
-                        grad_fp32.sub_(
-                            grad_fp32.mean(
-                                dim=tuple(range(1, grad_fp32.dim())), keepdim=True
-                            ).mul_(centralization)
-                        )
-                    if normalization != 0:
-                        self.normalize_gradient(
-                            grad_fp32, use_channels=normalize_channels, alpha=normalization
-                        )
-                    bias_correction = 1 - beta1 ** state["step"]
-                    bias_correction_sqrt = (1 - beta2 ** state["step"]) ** 0.5
-                    step_size = lr / bias_correction
-                    ema_fp32.mul_(beta1).add_(grad_fp32, alpha=1 - beta1)
-                    grad_fp32.add_(ema_fp32, alpha=amp_fac)
-                    ema_squared_fp32.mul_(beta2).addcmul_(
-                        grad_fp32, grad_fp32, value=1 - beta2
-                    )
-                    denom = ema_squared_fp32.sqrt().div_(bias_correction_sqrt).add_(eps)
-                    if decouple_weight_decay and weight_decay != 0:
-                        p_fp32.mul_(1 - step_size * weight_decay)
-                        update = grad_fp32.div(denom).mul(step_size)
-                    else:
-                        if weight_decay != 0:
-                            grad_fp32.add_(p_fp32, alpha=weight_decay)
-                        update = grad_fp32.div(denom).mul(step_size)
-                    if state["step"] > 1:
-                        grad_diff_norm = torch.norm(grad_fp32 - prev_grad_fp32)
-                        if grad_diff_norm < stochastic_threshold:
-                            self.apply_stochastic_operator(
-                                update,
-                                strategy=permutation_strategy,
-                            )
-                            state["stochastic_applied"] = True
+
+                # Apply gradient clipping if enabled
+                if clip_gradients and clip_lambda is not None:
+                    clip = clip_lambda(state["step"])
+                    update.clamp_(-clip, clip)
+
+                # Update parameters with stochastic BF16 rounding
+                if deterministic_seed is not None:
+                    param_seed = int(deterministic_seed) + state["step"] + hash(p) % 100000
+                else:
+                    # Use a random seed for non-deterministic mode
+                    param_seed = torch.randint(0, 2**31, ()).item()
+                if (
+                    p.dtype == torch.bfloat16 and p.is_cuda and
+                    ema.dtype == torch.bfloat16 and ema.is_cuda and
+                    ema_squared.dtype == torch.bfloat16 and ema_squared.is_cuda and
+                    grad.dtype == torch.float32 and grad.is_cuda
+                ):
+                    # Use fused CUDA kernel for param, ema, ema2
+                    cuda_fused_optimizer(p.data, ema, ema_squared, grad, lr, beta1, beta2, param_seed)
+                    # Update prev_grad as before
+                    if prev_grad.dtype == torch.bfloat16 and prev_grad.is_cuda:
+                        if use_stochastic_rounding and use_bit_manipulation:
+                            cuda_copy_stochastic_bf16_(prev_grad, grad_fp32, param_seed)
                         else:
-                            state["stochastic_applied"] = False
-                    if clip_gradients and clip_lambda is not None:
-                        clip = clip_lambda(state["step"])
-                        update.clamp_(-clip, clip)
-                    if deterministic_seed is not None:
-                        param_seed = int(deterministic_seed) + state["step"] + hash(p) % 100000
+                            prev_grad.copy_(self.apply_stochastic_bf16_rounding(
+                                grad_fp32,
+                                probability=stochastic_rounding_prob,
+                                magnitude=stochastic_rounding_magnitude,
+                                use_bit_manipulation=False,
+                            ))
                     else:
-                        param_seed = torch.randint(0, 2**31, ()).item()
-                    if (
-                        p.dtype == torch.bfloat16 and p.is_cuda and
-                        ema.dtype == torch.bfloat16 and ema.is_cuda and
-                        ema_squared.dtype == torch.bfloat16 and ema_squared.is_cuda and
-                        grad.dtype == torch.float32 and grad.is_cuda
-                    ):
-                        cuda_fused_optimizer(p.data, ema, ema_squared, grad, lr, beta1, beta2, param_seed)
-                        if prev_grad.dtype == torch.bfloat16 and prev_grad.is_cuda:
-                            if use_stochastic_rounding and use_bit_manipulation:
-                                cuda_copy_stochastic_bf16_(prev_grad, grad_fp32, param_seed)
-                            else:
-                                prev_grad.copy_(self.apply_stochastic_bf16_rounding(
+                        prev_grad.copy_(grad_fp32)
+                    continue  # skip rest, already updated param, ema, ema2
+                else:
+                    p_fp32.sub_(update)
+
+                # Apply stochastic BF16 rounding if enabled
+                if p.dtype == torch.bfloat16:
+                    if use_stochastic_rounding:
+                        if use_bit_manipulation:
+                            cuda_copy_stochastic_bf16_(p.data, p_fp32, param_seed)
+                        else:
+                            p.data.copy_(
+                                self.apply_stochastic_bf16_rounding(
+                                    p_fp32,
+                                    probability=stochastic_rounding_prob,
+                                    magnitude=stochastic_rounding_magnitude,
+                                    use_bit_manipulation=False,
+                                )
+                            )
+                    else:
+                        # Standard conversion to BF16
+                        p.data.copy_(p_fp32.to(torch.bfloat16))
+                else:
+                    # For non-BF16 parameters, just update directly
+                    p.data.copy_(p_fp32)
+
+                # Store current gradient for next iteration (with stochastic rounding if BF16)
+                if prev_grad.dtype == torch.bfloat16:
+                    if use_stochastic_rounding:
+                        if use_bit_manipulation:
+                            cuda_copy_stochastic_bf16_(prev_grad, grad_fp32, param_seed)
+                        else:
+                            prev_grad.copy_(
+                                self.apply_stochastic_bf16_rounding(
                                     grad_fp32,
                                     probability=stochastic_rounding_prob,
                                     magnitude=stochastic_rounding_magnitude,
                                     use_bit_manipulation=False,
-                                ))
-                        else:
-                            prev_grad.copy_(grad_fp32)
-                        continue
-                    else:
-                        p_fp32.sub_(update)
-                    if p.dtype == torch.bfloat16:
-                        if use_stochastic_rounding:
-                            if use_bit_manipulation:
-                                cuda_copy_stochastic_bf16_(p.data, p_fp32, param_seed)
-                            else:
-                                p.data.copy_(
-                                    self.apply_stochastic_bf16_rounding(
-                                        p_fp32,
-                                        probability=stochastic_rounding_prob,
-                                        magnitude=stochastic_rounding_magnitude,
-                                        use_bit_manipulation=False,
-                                    )
                                 )
-                        else:
-                            p.data.copy_(p_fp32.to(torch.bfloat16))
+                            )
                     else:
-                        p.data.copy_(p_fp32)
-                    if prev_grad.dtype == torch.bfloat16:
-                        if use_stochastic_rounding:
-                            if use_bit_manipulation:
-                                cuda_copy_stochastic_bf16_(prev_grad, grad_fp32, param_seed)
-                            else:
-                                prev_grad.copy_(
-                                    self.apply_stochastic_bf16_rounding(
-                                        grad_fp32,
-                                        probability=stochastic_rounding_prob,
-                                        magnitude=stochastic_rounding_magnitude,
-                                        use_bit_manipulation=False,
-                                    )
+                        prev_grad.copy_(grad_fp32.to(torch.bfloat16))
+                else:
+                    prev_grad.copy_(grad_fp32)
+
+                # Update state tensors with stochastic rounding if BF16
+                if ema.dtype == torch.bfloat16:
+                    if use_stochastic_rounding:
+                        if use_bit_manipulation:
+                            cuda_copy_stochastic_bf16_(ema, ema_fp32, param_seed)
+                        else:
+                            ema.copy_(
+                                self.apply_stochastic_bf16_rounding(
+                                    ema_fp32,
+                                    probability=stochastic_rounding_prob,
+                                    magnitude=stochastic_rounding_magnitude,
+                                    use_bit_manipulation=False,
                                 )
-                        else:
-                            prev_grad.copy_(grad_fp32.to(torch.bfloat16))
+                            )
                     else:
-                        prev_grad.copy_(grad_fp32)
-                    if ema.dtype == torch.bfloat16:
-                        if use_stochastic_rounding:
-                            if use_bit_manipulation:
-                                cuda_copy_stochastic_bf16_(ema, ema_fp32, param_seed)
-                            else:
-                                ema.copy_(
-                                    self.apply_stochastic_bf16_rounding(
-                                        ema_fp32,
-                                        probability=stochastic_rounding_prob,
-                                        magnitude=stochastic_rounding_magnitude,
-                                        use_bit_manipulation=False,
-                                    )
+                        ema.copy_(ema_fp32.to(torch.bfloat16))
+                else:
+                    ema.copy_(ema_fp32)
+
+                if ema_squared.dtype == torch.bfloat16:
+                    if use_stochastic_rounding:
+                        if use_bit_manipulation:
+                            cuda_copy_stochastic_bf16_(ema_squared, ema_squared_fp32, param_seed)
+                        else:
+                            ema_squared.copy_(
+                                self.apply_stochastic_bf16_rounding(
+                                    ema_squared_fp32,
+                                    probability=stochastic_rounding_prob,
+                                    magnitude=stochastic_rounding_magnitude,
+                                    use_bit_manipulation=False,
                                 )
-                        else:
-                            ema.copy_(ema_fp32.to(torch.bfloat16))
+                            )
                     else:
-                        ema.copy_(ema_fp32)
-                    if ema_squared.dtype == torch.bfloat16:
-                        if use_stochastic_rounding:
-                            if use_bit_manipulation:
-                                cuda_copy_stochastic_bf16_(ema_squared, ema_squared_fp32, param_seed)
-                            else:
-                                ema_squared.copy_(
-                                    self.apply_stochastic_bf16_rounding(
-                                        ema_squared_fp32,
-                                        probability=stochastic_rounding_prob,
-                                        magnitude=stochastic_rounding_magnitude,
-                                        use_bit_manipulation=False,
-                                    )
-                                )
-                        else:
-                            ema_squared.copy_(ema_squared_fp32.to(torch.bfloat16))
-                    else:
-                        ema_squared.copy_(ema_squared_fp32)
+                        ema_squared.copy_(ema_squared_fp32.to(torch.bfloat16))
+                else:
+                    ema_squared.copy_(ema_squared_fp32)
+
         return loss
