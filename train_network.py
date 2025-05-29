@@ -1035,6 +1035,8 @@ class NetworkTrainer:
                             accelerator.log(logs, step=global_step)
                         if global_step >= args.max_train_steps:
                             break
+                        if prof is not None:
+                            prof.step()
                     if args.logging_dir is not None:
                         logs = {"loss/epoch": loss_recorder.moving_average}
                         accelerator.log(logs, step=epoch + 1)
@@ -1051,7 +1053,6 @@ class NetworkTrainer:
                             if args.save_state:
                                 train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
                     self.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizer, text_encoder, unet)
-                    prof.step()
             # Only export if kineto_results is not None
             if getattr(prof, "kineto_results", None) is not None:
                 prof.export_chrome_trace(args.profiler_output)
@@ -1207,6 +1208,8 @@ class NetworkTrainer:
                         accelerator.log(logs, step=global_step)
                     if global_step >= args.max_train_steps:
                         break
+                    if prof is not None:
+                        prof.step()
                 if args.logging_dir is not None:
                     logs = {"loss/epoch": loss_recorder.moving_average}
                     accelerator.log(logs, step=epoch + 1)
@@ -1222,7 +1225,7 @@ class NetworkTrainer:
                             remove_model(remove_ckpt_name)
                         if args.save_state:
                             train_util.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
-                self.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizer, text_encoder, unet)
+                    self.sample_images(accelerator, args, epoch + 1, global_step, accelerator.device, vae, tokenizer, text_encoder, unet)
 
         metadata["ss_training_finished_at"] = str(time.time())
 

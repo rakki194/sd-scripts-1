@@ -498,7 +498,7 @@ class DreamBoothSubset(BaseSubset):
     ) -> None:
         assert (
             image_dir is not None
-        ), "image_dir must be specified / image_dirは指定が必須です"
+        ), "image_dir must be specified"
 
         super().__init__(
             image_dir,
@@ -563,7 +563,7 @@ class FineTuningSubset(BaseSubset):
     ) -> None:
         assert (
             metadata_file is not None
-        ), "metadata_file must be specified / metadata_fileは指定が必須です"
+        ), "metadata_file must be specified"
 
         super().__init__(
             image_dir,
@@ -624,7 +624,7 @@ class ControlNetSubset(BaseSubset):
     ) -> None:
         assert (
             image_dir is not None
-        ), "image_dir must be specified / image_dirは指定が必須です"
+        ), "image_dir must be specified"
 
         super().__init__(
             image_dir,
@@ -738,8 +738,7 @@ class BaseDataset(torch.utils.data.Dataset):
                 min_bucket_reso - min_bucket_reso % bucket_reso_steps
             )
             logger.warning(
-                f"min_bucket_reso is adjusted to be multiple of bucket_reso_steps"
-                f" / min_bucket_resoがbucket_reso_stepsの倍数になるように調整されました: {min_bucket_reso} -> {adjusted_min_bucket_reso}"
+                f"min_bucket_reso is adjusted to be multiple of bucket_reso_steps: {min_bucket_reso} -> {adjusted_min_bucket_reso}"
             )
             min_bucket_reso = adjusted_min_bucket_reso
         if max_bucket_reso % bucket_reso_steps != 0:
@@ -749,17 +748,16 @@ class BaseDataset(torch.utils.data.Dataset):
                 - max_bucket_reso % bucket_reso_steps
             )
             logger.warning(
-                f"max_bucket_reso is adjusted to be multiple of bucket_reso_steps"
-                f" / max_bucket_resoがbucket_reso_stepsの倍数になるように調整されました: {max_bucket_reso} -> {adjusted_max_bucket_reso}"
+                f"max_bucket_reso is adjusted to be multiple of bucket_reso_steps: {max_bucket_reso} -> {adjusted_max_bucket_reso}"
             )
             max_bucket_reso = adjusted_max_bucket_reso
 
         assert (
             min(resolution) >= min_bucket_reso
-        ), f"min_bucket_reso must be equal or less than resolution / min_bucket_resoは最小解像度より大きくできません。解像度を大きくするかmin_bucket_resoを小さくしてください"
+        ), f"min_bucket_reso must be equal or less than resolution"
         assert (
             max(resolution) <= max_bucket_reso
-        ), f"max_bucket_reso must be equal or greater than resolution / max_bucket_resoは最大解像度より小さくできません。解像度を小さくするかmin_bucket_resoを大きくしてください"
+        ), f"max_bucket_reso must be equal or greater than resolution"
 
         return min_bucket_reso, max_bucket_reso
 
@@ -1069,7 +1067,7 @@ class BaseDataset(torch.utils.data.Dataset):
                     self.bucket_manager.make_buckets()
                 else:
                     logger.warning(
-                        "min_bucket_reso and max_bucket_reso are ignored if bucket_no_upscale is set, because bucket reso is defined by image size automatically / bucket_no_upscaleが指定された場合は、bucketの解像度は画像サイズから自動計算されるため、min_bucket_resoとmax_bucket_resoは無視されます"
+                        "min_bucket_reso and max_bucket_reso are ignored if bucket_no_upscale is set, because bucket reso is defined by image size automatically"
                     )
 
             img_ar_errors = []
@@ -1106,7 +1104,7 @@ class BaseDataset(torch.utils.data.Dataset):
         if self.enable_bucket:
             self.bucket_info = {"buckets": {}}
             logger.info(
-                "number of images (including repeats) / 各bucketの画像枚数（繰り返し回数を含む）"
+                "number of images (including repeats)"
             )
             for i, (reso, bucket) in enumerate(
                 zip(self.bucket_manager.resos, self.bucket_manager.buckets)

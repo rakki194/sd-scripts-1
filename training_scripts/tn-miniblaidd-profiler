@@ -4,7 +4,7 @@ set -e -o pipefail
 # Ensure deterministic CuBLAS for PyTorch
 #export CUBLAS_WORKSPACE_CONFIG=:4096:8
 
-NAME=noob-sparkles-miniblaidd-profiler-v10s2                    # Name of the model to be trained (continued version)
+NAME=noob-sparkles-miniblaidd-profiler-v12s2                    # Name of the model to be trained (continued version)
 # Optional variables
 TRAINING_DIR="/home/kade/datasets/miniblaidd"                     # Directory containing dataset
 # STEPS=                                                  # Total training steps
